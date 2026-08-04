@@ -63,7 +63,24 @@ export async function searchContacts(query, limit = 10) {
     name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
     email: c.email,
     phone: c.phone,
+    assignedTo: c.assignedTo || null,
   }));
+}
+
+export async function getContactById(contactId) {
+  const data = await ghlGet(`/contacts/${contactId}`);
+  const c = data.contact || data;
+  return {
+    id: c.id,
+    name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
+    assignedTo: c.assignedTo || null,
+  };
+}
+
+export async function getConversationById(conversationId) {
+  const data = await ghlGet(`/conversations/${conversationId}`);
+  const c = data.conversation || data;
+  return { id: c.id, contactId: c.contactId };
 }
 
 export async function getConversationsForContact(contactId) {
@@ -92,7 +109,7 @@ export async function getConversationMessages(conversationId, limit = 50) {
 export async function getMessage(messageId) {
   const data = await ghlGet(`/conversations/messages/${messageId}`);
   const m = data.message || data;
-  return { id: m.id, type: m.messageType, direction: m.direction, dateAdded: m.dateAdded };
+  return { id: m.id, type: m.messageType, direction: m.direction, dateAdded: m.dateAdded, conversationId: m.conversationId || null };
 }
 
 export async function getCallTranscript(messageId) {

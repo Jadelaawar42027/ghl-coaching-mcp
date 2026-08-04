@@ -19,11 +19,13 @@ cp .env.example .env
 
 Fill in `.env`:
 - `GHL_API_TOKEN`, `GHL_LOCATION_ID`, `GHL_COMPANY_ID` — from your GHL account
-- `MCP_AUTH_TOKEN` — only needed for `server-http.js`. Generate a strong random value:
+- `JWT_SECRET` — only needed for `server-http.js`. Generate a strong random value:
   ```bash
   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
   ```
-  This is the shared secret the WhatsApp bot presents on every request — treat it like a password.
+  This must match the WhatsApp bot's `JWT_SECRET` exactly — it's what lets this server verify the
+  signed identity token (name, role, ghlUserId) the bot mints per caller, so per-broker access
+  restrictions in `access.js` hold even against a malicious/confused caller.
 
 ## Running locally
 
@@ -36,9 +38,9 @@ npm run start:stdio
 ```bash
 npm run start:http
 ```
-Boots on `http://localhost:4000` (or `$MCP_PORT`). The tool endpoint is `POST /mcp`,
-and requires `Authorization: Bearer <MCP_AUTH_TOKEN>` on every request — unauthenticated
-or wrong-token requests get a 401.
+Boots on `http://localhost:4000` (or `$PORT`/`$MCP_PORT`). The tool endpoint is `POST /mcp`,
+and requires `Authorization: Bearer <signed JWT>` on every request — missing, invalid, expired,
+or malformed-identity tokens get a 401.
 
 ### Testing the HTTP server is reachable
 ```bash
@@ -62,7 +64,7 @@ Deploy `server-http.js` the same way as the WhatsApp bot — Railway or Render b
 3. Set the same env vars from `.env` in their dashboard
 4. Start command is `npm run start:http` (already configured via `railway.json` for Railway)
 5. Once deployed, take the resulting URL + `/mcp` and put it in the **WhatsApp bot's**
-   `.env` as `GHL_MCP_URL`, with `GHL_MCP_AUTH_TOKEN` matching this service's `MCP_AUTH_TOKEN`
+   `.env` as `GHL_MCP_URL`, with the bot's `JWT_SECRET` matching this service's `JWT_SECRET`
 
 ## Available tools
 
@@ -79,6 +81,7 @@ Deploy `server-http.js` the same way as the WhatsApp bot — Railway or Render b
 ## Security note
 
 `server-http.js` sits on the public internet in front of real lead, broker, and pipeline
-data once deployed. The bearer token check in `requireAuth` is the only thing standing
-between that data and anyone who finds the URL — don't skip setting `MCP_AUTH_TOKEN`,
-don't reuse a weak/guessable value, and don't commit `.env` (already covered by `.gitignore`).
+data once deployed. The JWT verification in `requireAuth`, plus the per-broker ownership
+checks in `access.js`, are the only things standing between that data and anyone who finds
+the URL — don't skip setting `JWT_SECRET`, don't reuse a weak/guessable value, and don't
+commit `.env` (already covered by `.gitignore`).
