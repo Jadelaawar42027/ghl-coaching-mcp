@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerTools } from './tools.js';
+import { resolveGhlUserId, UserResolutionError } from './brokerResolver.js';
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -14,11 +15,12 @@ const app = express();
 app.use(express.json());
 
 // --- Auth: verifies a short-lived signed token proving WHO is calling
-// (name, role, ghlUserId), minted by the WhatsApp bot per message based on
-// the sender's phone number. This is what lets tools.js enforce "brokers
-// only see their own deals" - the identity is cryptographically attested,
-// not just a claim Claude could be talked into ignoring. ---
-function requireAuth(req, res, next) {
+// (name + role), minted by the WhatsApp bot per message based on the
+// sender's phone number. The GHL user ID is NOT carried in the token - it's
+// resolved here, dynamically, from the name via GHL's own user list. This
+// means the WhatsApp bot's roster never needs a GHL ID hardcoded in it, and
+// stays correct automatically if IDs ever change on the GHL side. ---
+async function requireAuth(req, res, next) {
   const header = req.headers['authorization'] || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
 
@@ -26,16 +28,31 @@ function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized - missing token' });
   }
 
+  let identity;
   try {
-    const identity = jwt.verify(token, JWT_SECRET);
-    if (!identity.role || !identity.ghlUserId) {
-      return res.status(401).json({ error: 'Unauthorized - malformed identity token' });
-    }
-    req.identity = identity; // { name, role, ghlUserId }
-    next();
+    identity = jwt.verify(token, JWT_SECRET);
   } catch (err) {
     return res.status(401).json({ error: 'Unauthorized - invalid or expired token' });
   }
+
+  if (identity.role !== 'leadership' && identity.role !== 'broker') {
+    return res.status(401).json({ error: 'Unauthorized - malformed identity token' });
+  }
+
+  if (identity.role === 'broker') {
+    try {
+      identity.ghlUserId = await resolveGhlUserId(identity.name);
+    } catch (err) {
+      if (err instanceof UserResolutionError) {
+        return res.status(403).json({ error: err.message });
+      }
+      console.error('Error resolving broker GHL user ID:', err);
+      return res.status(500).json({ error: 'Internal error resolving identity' });
+    }
+  }
+
+  req.identity = identity; // { name, role, ghlUserId? }
+  next();
 }
 
 // Stateless mode: a fresh McpServer + transport per request, scoped to the
