@@ -11,6 +11,8 @@ import {
   createTask,
   createNote,
   getContactTasks,
+  updateContactTemperature,
+  getLastOutboundMessageDate,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -104,7 +106,7 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_broker_leads_overview',
-    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, and showing-booked outcome. Does NOT include message text or transcripts. Non-leadership users can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied.',
+    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, showing-booked outcome, and Lead Temperature tier (Platinum/Gold/Silver/Bronze - the primary prioritization signal). Does NOT include message text or transcripts. Non-leadership users can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied.',
     { brokerId: z.string().describe('The GHL user ID of the broker, from list_brokers') },
     async ({ brokerId }) => {
       if (!isLeadership(identity) && brokerId !== identity.ghlUserId) {
@@ -198,6 +200,41 @@ export function registerTools(server, identity) {
       }
       const results = await getContactTasks(contactId);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'update_lead_temperature',
+    'Set a lead\'s temperature tier, which drives how they\'re prioritized in digests and how often they should be followed up with. Tiers: Platinum (buying within 30 days - contact almost daily, right away), Gold (buying in 2-6 months - weekly follow-up), Silver (6-18 months - mostly automated nurture, monthly personal outreach), Bronze (long-term/not yet serious - mostly marketing, no expected manual follow-up). Use this when a broker explicitly tells you to update a lead\'s tier, or when conversation content clearly indicates a tier change (e.g. a Silver lead who just said they want to buy this month should become Platinum) - confirm with the broker before changing it based on inference alone. Non-leadership users can only update their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID'),
+      temperature: z.enum(['Platinum', 'Gold', 'Silver', 'Bronze']).describe('The new temperature tier'),
+    },
+    async ({ contactId, temperature }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await updateContactTemperature(contactId, temperature);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'get_last_broker_contact_date',
+    'Get the date of the most recent OUTBOUND message (broker -> lead) for a contact - the real, automatic signal for "when did the broker last actually reach out," derived from real message data rather than anything manually logged. Use this to check whether a lead is overdue for their tier\'s expected cadence (Platinum: contact almost daily; Gold: weekly; Silver: monthly). Returns null if there has never been an outbound message. Non-leadership users can only check their own contacts.',
+    { contactId: z.string().describe('The GHL contact ID') },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const lastDate = await getLastOutboundMessageDate(contactId);
+      return { content: [{ type: 'text', text: JSON.stringify({ lastOutboundMessageDate: lastDate }, null, 2) }] };
     }
   );
 }

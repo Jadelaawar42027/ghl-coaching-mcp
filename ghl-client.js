@@ -13,6 +13,21 @@ if (!TOKEN || !LOCATION_ID) {
 
 const OUTCOME_FIELD_ID = 'aDklmSDnzDVvU8Dpy9yg';
 
+// Lead Temperature custom field (Platinum/Gold/Silver/Bronze) - the field ID
+// from GHL's Custom Fields ("Lead Temperature", Sales Tracking folder).
+const TEMPERATURE_FIELD_ID = process.env.GHL_LEAD_TEMPERATURE_FIELD_ID || null;
+
+// Note: no separate "Last Checked" field. Last-broker-contact date is
+// derived from real conversation data (most recent OUTBOUND message) rather
+// than a manually-maintained field - more accurate, and no extra step for
+// brokers to remember. See getLastOutboundMessageDate below.
+
+function extractCustomField(contact, fieldId) {
+  if (!fieldId) return null;
+  const field = (contact.customFields || []).find((f) => f.id === fieldId);
+  return field ? field.value : null;
+}
+
 function headers() {
   return {
     Authorization: `Bearer ${TOKEN}`,
@@ -64,6 +79,7 @@ export async function searchContacts(query, limit = 10) {
     email: c.email,
     phone: c.phone,
     assignedTo: c.assignedTo || null,
+    temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
   }));
 }
 
@@ -74,6 +90,7 @@ export async function getContactById(contactId) {
     id: c.id,
     name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
     assignedTo: c.assignedTo || null,
+    temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
   };
 }
 
@@ -104,6 +121,30 @@ export async function getConversationMessages(conversationId, limit = 50) {
     body: m.body || null,
     status: m.status || null,
   }));
+}
+
+/**
+ * Returns the date of the most recent OUTBOUND message (broker -> lead)
+ * across a contact's conversations, or null if there's never been one.
+ * This is the real, automatic signal for "when did the broker last actually
+ * contact this lead" - no manual field to remember to update, and it
+ * reflects real activity rather than something a broker forgot to log.
+ */
+export async function getLastOutboundMessageDate(contactId) {
+  const conversations = await getConversationsForContact(contactId);
+  if (conversations.length === 0) return null;
+
+  let latest = null;
+  for (const convo of conversations) {
+    const messages = await getConversationMessages(convo.id, 100);
+    const outbound = messages.filter((m) => m.direction === 'outbound');
+    for (const m of outbound) {
+      if (!latest || new Date(m.dateAdded) > new Date(latest)) {
+        latest = m.dateAdded;
+      }
+    }
+  }
+  return latest;
 }
 
 export async function getMessage(messageId) {
@@ -157,6 +198,7 @@ export async function getContactsByOwner(ownerId, limit = 100) {
       name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
       dateAdded: c.dateAdded,
       outcome: outcomeField ? outcomeField.value : null,
+      temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
     };
   });
 }
@@ -253,4 +295,25 @@ export async function getContactTasks(contactId) {
     completed: !!t.completed,
     assignedTo: t.assignedTo,
   }));
+}
+
+export async function updateContactTemperature(contactId, temperature) {
+  if (!TEMPERATURE_FIELD_ID) {
+    throw new Error('GHL_LEAD_TEMPERATURE_FIELD_ID is not configured - the Lead Temperature custom field ID must be set in .env before this can be used.');
+  }
+
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customFields: [{ id: TEMPERATURE_FIELD_ID, value: temperature }],
+    }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on update lead temperature: ${errBody}`);
+  }
+
+  return res.json();
 }
