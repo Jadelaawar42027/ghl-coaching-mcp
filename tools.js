@@ -9,6 +9,8 @@ import {
   listPipelines,
   getOpportunitiesByStage,
   createTask,
+  createNote,
+  getContactTasks,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -159,6 +161,43 @@ export function registerTools(server, identity) {
       }
       const result = await createTask(contactId, { title, body, assignedTo, dueDate });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'add_note',
+    'Add a note to a contact/lead in GHL - use this for logging call summaries, context, or observations that aren\'t a task/follow-up (use create_task for those instead). Requires the contact ID (from search_contacts or get_opportunities_by_stage). Non-leadership users can only add notes to their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID to add the note to'),
+      body: z.string().describe('The note text'),
+    },
+    async ({ contactId, body }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      // userId is optional on GHL's side - omit if this identity has no
+      // resolved ghlUserId (e.g. leadership entries that were never given one).
+      const result = await createNote(contactId, { body, userId: identity.ghlUserId || undefined });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'get_contact_tasks',
+    'Get open and completed tasks for a contact/lead, including due dates. Use this to check whether a lead has a defined next action: if there are no open (incomplete) tasks, that lead has no next step, which is worth flagging - every active lead should have one. Also use this to find tasks due today. Non-leadership users can only check tasks on their own contacts.',
+    { contactId: z.string().describe('The GHL contact ID') },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const results = await getContactTasks(contactId);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
 }

@@ -227,3 +227,30 @@ export async function createTask(contactId, { title, body, assignedTo, dueDate }
 
   return res.json();
 }
+
+export async function createNote(contactId, { body, userId }) {
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}/notes`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ body, userId }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on create note: ${errBody}`);
+  }
+
+  return res.json();
+}
+
+export async function getContactTasks(contactId) {
+  const data = await ghlGet(`/contacts/${contactId}/tasks`);
+  return (data.tasks || data || []).map((t) => ({
+    id: t.id,
+    title: t.title,
+    body: t.body,
+    dueDate: t.dueDate,
+    completed: !!t.completed,
+    assignedTo: t.assignedTo,
+  }));
+}
