@@ -11,7 +11,7 @@ import {
   createTask,
   createNote,
   getContactTasks,
-  updateContactTemperature,
+  updateLeadStatus,
   getLastOutboundMessageDate,
 } from './ghl-client.js';
 import {
@@ -106,7 +106,7 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_broker_leads_overview',
-    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, showing-booked outcome, and Lead Temperature tier (Platinum/Gold/Silver/Bronze - the primary prioritization signal). Does NOT include message text or transcripts. Non-leadership users can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied.',
+    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, showing-booked outcome, Lead Priority status (Buy Now/Active/Nurture/Low Priority/On Hold/Closed - the primary prioritization signal), and Hot flag (a separate boolean marking especially urgent buying signals within any priority tier). Does NOT include message text or transcripts. Non-leadership users can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied.',
     { brokerId: z.string().describe('The GHL user ID of the broker, from list_brokers') },
     async ({ brokerId }) => {
       if (!isLeadership(identity) && brokerId !== identity.ghlUserId) {
@@ -204,27 +204,33 @@ export function registerTools(server, identity) {
   );
 
   server.tool(
-    'update_lead_temperature',
-    'Set a lead\'s temperature tier, which drives how they\'re prioritized in digests and how often they should be followed up with. Tiers: Platinum (buying within 30 days - contact almost daily, right away), Gold (buying in 2-6 months - weekly follow-up), Silver (6-18 months - mostly automated nurture, monthly personal outreach), Bronze (long-term/not yet serious - mostly marketing, no expected manual follow-up). Use this when a broker explicitly tells you to update a lead\'s tier, or when conversation content clearly indicates a tier change (e.g. a Silver lead who just said they want to buy this month should become Platinum) - confirm with the broker before changing it based on inference alone. Non-leadership users can only update their own contacts.',
+    'update_lead_status',
+    'Set a lead\'s Priority status and/or Hot flag - these are separate, independent signals. ' +
+    'PRIORITY (6 statuses, drives digest prioritization and expected cadence): "Buy Now" (0-30 days, budget verified, financing/proof of funds available, actively responding and ready to view/schedule - contact almost daily) | "Active" (30-90 days out, serious, still comparing, needs regular follow-up) | "Nurture" (3-12 months, still researching, wants education/recommendations) | "Low Priority" (very early stage, no defined budget, browsing, infrequent engagement) | "On Hold" (explicitly asked to pause - vacation, waiting to sell another boat, waiting on financing) | "Closed" (bought elsewhere, no longer interested, unqualified). Changing PRIORITY requires confirming with the broker first UNLESS they explicitly told you to change it - don\'t silently reassign priority based on your own inference alone. ' +
+    'HOT (boolean, independent of priority - a lead can be "Active" AND Hot at the same time): set hot=true automatically, WITHOUT asking first, the moment you see strong buying-signal language in a conversation you\'re reading - phrases like wanting to buy this week, asking to make an offer, saying they\'re flying in soon, having proof of funds ready, or asking to schedule a viewing. This one you apply proactively since the whole point is catching urgency in real time; mention that you flagged it when you do. Non-leadership users can only update their own contacts.',
     {
       contactId: z.string().describe('The GHL contact ID'),
-      temperature: z.enum(['Platinum', 'Gold', 'Silver', 'Bronze']).describe('The new temperature tier'),
+      priority: z.enum(['Buy Now', 'Active', 'Nurture', 'Low Priority', 'On Hold', 'Closed']).optional().describe('The new priority status - omit if only updating the Hot flag'),
+      hot: z.boolean().optional().describe('Whether this lead should be flagged Hot - omit if only updating priority'),
     },
-    async ({ contactId, temperature }) => {
+    async ({ contactId, priority, hot }) => {
       try {
         await assertContactAccess(contactId, identity);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await updateContactTemperature(contactId, temperature);
+      if (priority === undefined && hot === undefined) {
+        return { content: [{ type: 'text', text: 'Error: must provide at least one of priority or hot.' }], isError: true };
+      }
+      const result = await updateLeadStatus(contactId, { priority, hot });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 
   server.tool(
     'get_last_broker_contact_date',
-    'Get the date of the most recent OUTBOUND message (broker -> lead) for a contact - the real, automatic signal for "when did the broker last actually reach out," derived from real message data rather than anything manually logged. Use this to check whether a lead is overdue for their tier\'s expected cadence (Platinum: contact almost daily; Gold: weekly; Silver: monthly). Returns null if there has never been an outbound message. Non-leadership users can only check their own contacts.',
+    'Get the date of the most recent OUTBOUND message (broker -> lead) for a contact - the real, automatic signal for "when did the broker last actually reach out," derived from real message data rather than anything manually logged. Use this to check whether a lead is overdue for their priority tier\'s expected cadence (Buy Now: contact almost daily; Active: regular/weekly follow-up; Nurture: occasional). Returns null if there has never been an outbound message. Non-leadership users can only check their own contacts.',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {

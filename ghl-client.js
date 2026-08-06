@@ -13,9 +13,29 @@ if (!TOKEN || !LOCATION_ID) {
 
 const OUTCOME_FIELD_ID = 'aDklmSDnzDVvU8Dpy9yg';
 
-// Lead Temperature custom field (Platinum/Gold/Silver/Bronze) - the field ID
-// from GHL's Custom Fields ("Lead Temperature", Sales Tracking folder).
-const TEMPERATURE_FIELD_ID = process.env.GHL_LEAD_TEMPERATURE_FIELD_ID || null;
+// Lead Priority custom field - same field previously called "Lead
+// Temperature" (field ID unchanged), now repurposed with 6 status values:
+// Buy Now / Active / Nurture / Low Priority / On Hold / Closed.
+const PRIORITY_FIELD_ID = process.env.GHL_LEAD_TEMPERATURE_FIELD_ID || null;
+
+// Hot Lead flag - a SEPARATE field from priority. Orthogonal: a lead can be
+// "Active" AND "Hot" at the same time. Auto-applied by the AI when it
+// detects strong buying-signal language (see systemPrompt.js), not just on
+// explicit broker request.
+const HOT_FLAG_FIELD_ID = process.env.GHL_HOT_LEAD_FIELD_ID || null;
+
+// Display labels: GHL stores plain text values (no emoji, cleaner for
+// filtering/reporting); the emoji is applied here for anything shown to a
+// person. Keep this map as the single source of truth for labels so the
+// digest and chat always render identically.
+export const PRIORITY_LABELS = {
+  'Buy Now': '🔴 Buy Now',
+  'Active': '🟠 Active',
+  'Nurture': '🟡 Nurture',
+  'Low Priority': '⚪ Low Priority',
+  'On Hold': '⚫ On Hold',
+  'Closed': '🚫 Closed',
+};
 
 // Note: no separate "Last Checked" field. Last-broker-contact date is
 // derived from real conversation data (most recent OUTBOUND message) rather
@@ -26,6 +46,15 @@ function extractCustomField(contact, fieldId) {
   if (!fieldId) return null;
   const field = (contact.customFields || []).find((f) => f.id === fieldId);
   return field ? field.value : null;
+}
+
+function extractHotFlag(contact) {
+  if (!HOT_FLAG_FIELD_ID) return false;
+  const raw = extractCustomField(contact, HOT_FLAG_FIELD_ID);
+  // Checkbox fields in GHL typically come back as an array of selected
+  // option labels (e.g. ["Hot"]) when checked, or empty/absent when not.
+  if (Array.isArray(raw)) return raw.length > 0;
+  return !!raw;
 }
 
 function headers() {
@@ -79,7 +108,8 @@ export async function searchContacts(query, limit = 10) {
     email: c.email,
     phone: c.phone,
     assignedTo: c.assignedTo || null,
-    temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
+    priority: extractCustomField(c, PRIORITY_FIELD_ID),
+    hot: extractHotFlag(c),
   }));
 }
 
@@ -90,7 +120,8 @@ export async function getContactById(contactId) {
     id: c.id,
     name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
     assignedTo: c.assignedTo || null,
-    temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
+    priority: extractCustomField(c, PRIORITY_FIELD_ID),
+    hot: extractHotFlag(c),
   };
 }
 
@@ -198,7 +229,8 @@ export async function getContactsByOwner(ownerId, limit = 100) {
       name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
       dateAdded: c.dateAdded,
       outcome: outcomeField ? outcomeField.value : null,
-      temperature: extractCustomField(c, TEMPERATURE_FIELD_ID),
+      priority: extractCustomField(c, PRIORITY_FIELD_ID),
+      hot: extractHotFlag(c),
     };
   });
 }
@@ -297,22 +329,46 @@ export async function getContactTasks(contactId) {
   }));
 }
 
-export async function updateContactTemperature(contactId, temperature) {
-  if (!TEMPERATURE_FIELD_ID) {
-    throw new Error('GHL_LEAD_TEMPERATURE_FIELD_ID is not configured - the Lead Temperature custom field ID must be set in .env before this can be used.');
+/**
+ * Updates a lead's priority and/or hot flag. Pass either or both -
+ * whichever is provided gets written, the other is left untouched.
+ * @param {string} contactId
+ * @param {{priority?: string, hot?: boolean}} updates
+ */
+export async function updateLeadStatus(contactId, { priority, hot } = {}) {
+  const customFields = [];
+
+  if (priority !== undefined) {
+    if (!PRIORITY_FIELD_ID) {
+      throw new Error('GHL_LEAD_TEMPERATURE_FIELD_ID is not configured - the Lead Priority custom field ID must be set in .env before this can be used.');
+    }
+    customFields.push({ id: PRIORITY_FIELD_ID, value: priority });
+  }
+
+  if (hot !== undefined) {
+    if (!HOT_FLAG_FIELD_ID) {
+      throw new Error('GHL_HOT_LEAD_FIELD_ID is not configured - the Hot Lead custom field ID must be set in .env before this can be used.');
+    }
+    // This is a RADIO field with a single option "Hot Lead" - GHL's flag
+    // pattern elsewhere in this account (see "Called Lead", "Self Generated
+    // Deal"). RADIO fields store a plain string value, not an array like
+    // checkboxes - set to the option label to flag, empty string to clear.
+    customFields.push({ id: HOT_FLAG_FIELD_ID, value: hot ? 'Hot Lead' : '' });
+  }
+
+  if (customFields.length === 0) {
+    throw new Error('updateLeadStatus called with neither priority nor hot - nothing to update.');
   }
 
   const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      customFields: [{ id: TEMPERATURE_FIELD_ID, value: temperature }],
-    }),
+    body: JSON.stringify({ customFields }),
   });
 
   if (!res.ok) {
     const errBody = await res.text();
-    throw new Error(`GHL API error ${res.status} on update lead temperature: ${errBody}`);
+    throw new Error(`GHL API error ${res.status} on update lead status: ${errBody}`);
   }
 
   return res.json();
