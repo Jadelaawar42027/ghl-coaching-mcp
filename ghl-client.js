@@ -317,6 +317,16 @@ export async function createNote(contactId, { body, userId }) {
   return res.json();
 }
 
+export async function getContactNotes(contactId) {
+  const data = await ghlGet(`/contacts/${contactId}/notes`);
+  return (data.notes || data || []).map((n) => ({
+    id: n.id,
+    body: n.body,
+    dateAdded: n.dateAdded,
+    createdBy: n.userId || n.createdBy || null,
+  }));
+}
+
 export async function getContactTasks(contactId) {
   const data = await ghlGet(`/contacts/${contactId}/tasks`);
   return (data.tasks || data || []).map((t) => ({

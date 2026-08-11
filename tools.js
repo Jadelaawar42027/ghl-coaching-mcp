@@ -11,6 +11,7 @@ import {
   createTask,
   createNote,
   getContactTasks,
+  getContactNotes,
   updateLeadStatus,
   getLastOutboundMessageDate,
 } from './ghl-client.js';
@@ -199,6 +200,22 @@ export function registerTools(server, identity) {
         throw err;
       }
       const results = await getContactTasks(contactId);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'get_contact_notes',
+    'Get all notes logged on a contact/lead, most relevant for catching updates that happened outside the tracked conversation channels - e.g. a broker reporting they called on a personal cell, or that a showing/deal milestone happened, gets logged here even though it won\'t show up as an inbound/outbound message. ALWAYS check this alongside get_conversation_timeline and get_last_broker_contact_date before concluding a lead has been neglected or has no recent activity - a lead can look stale by message data alone while a recent note shows real progress. Non-leadership users can only check notes on their own contacts.',
+    { contactId: z.string().describe('The GHL contact ID') },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const results = await getContactNotes(contactId);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
