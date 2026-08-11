@@ -14,6 +14,9 @@ import {
   getContactNotes,
   updateLeadStatus,
   getLastOutboundMessageDate,
+  getOpportunitiesForContact,
+  updateOpportunityStage,
+  reassignContact,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -258,6 +261,61 @@ export function registerTools(server, identity) {
       }
       const lastDate = await getLastOutboundMessageDate(contactId);
       return { content: [{ type: 'text', text: JSON.stringify({ lastOutboundMessageDate: lastDate }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'get_opportunities_for_contact',
+    'Get all opportunities (deals) for a specific contact, including which pipeline/stage each is currently in. Use this before update_opportunity_stage to find the right opportunity ID and confirm its current pipeline/stage. Non-leadership users can only check their own contacts.',
+    { contactId: z.string().describe('The GHL contact ID') },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const results = await getOpportunitiesForContact(contactId);
+      return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'update_opportunity_stage',
+    'Move an opportunity (deal) to a different pipeline stage. Use list_pipelines first to resolve the target stage ID by name, and get_opportunities_for_contact to find the right opportunity ID. Only use this when explicitly asked to move a lead\'s stage (e.g. a broker choosing to send a no-show lead to reactivation) - never move a stage based on your own inference alone. Non-leadership users can only move opportunities belonging to their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID this opportunity belongs to, used to verify ownership'),
+      opportunityId: z.string().describe('The opportunity ID, from get_opportunities_for_contact'),
+      stageId: z.string().describe('The target pipeline stage ID, from list_pipelines'),
+    },
+    async ({ contactId, opportunityId, stageId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await updateOpportunityStage(opportunityId, stageId);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'reassign_contact',
+    'Reassign a contact/lead to a different broker (changes who owns and is responsible for them). Use list_brokers first to resolve the new owner\'s user ID by name. Only use this when explicitly asked to reassign a lead (e.g. a broker choosing to send a no-show lead to reactivation, which gets reassigned to a specific team member) - never reassign based on your own inference alone, this is a significant action. Non-leadership users can only reassign their own contacts (giving them up), not reassign contacts belonging to other brokers.',
+    {
+      contactId: z.string().describe('The GHL contact ID to reassign'),
+      newAssignedToUserId: z.string().describe('The GHL user ID of the new owner, from list_brokers'),
+    },
+    async ({ contactId, newAssignedToUserId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await reassignContact(contactId, newAssignedToUserId);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 }

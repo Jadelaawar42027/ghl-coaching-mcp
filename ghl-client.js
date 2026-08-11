@@ -287,6 +287,56 @@ export async function getOpportunitiesByStage(pipelineId, stageId, limit = 100) 
   }));
 }
 
+export async function getOpportunitiesForContact(contactId, limit = 20) {
+  const data = await ghlGet('/opportunities/search', {
+    location_id: LOCATION_ID,
+    contact_id: contactId,
+    limit,
+  });
+
+  return (data.opportunities || []).map((o) => ({
+    id: o.id,
+    contactId: o.contactId,
+    name: o.name,
+    pipelineId: o.pipelineId,
+    pipelineStageId: o.pipelineStageId,
+    assignedTo: o.assignedTo,
+    status: o.status,
+    monetaryValue: o.monetaryValue,
+    updatedAt: o.updatedAt,
+  }));
+}
+
+export async function updateOpportunityStage(opportunityId, pipelineStageId) {
+  const res = await fetch(`${BASE_URL}/opportunities/${opportunityId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pipelineStageId }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on update opportunity stage: ${errBody}`);
+  }
+
+  return res.json();
+}
+
+export async function reassignContact(contactId, newAssignedToUserId) {
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ assignedTo: newAssignedToUserId }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on reassign contact: ${errBody}`);
+  }
+
+  return res.json();
+}
+
 export async function createTask(contactId, { title, body, assignedTo, dueDate }) {
   const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks`, {
     method: 'POST',
