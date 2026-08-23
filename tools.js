@@ -9,6 +9,8 @@ import {
   listPipelines,
   getOpportunitiesByStage,
   createTask,
+  updateTask,
+  completeTask,
   createNote,
   getContactTasks,
   getContactNotes,
@@ -187,6 +189,50 @@ export function registerTools(server, identity) {
       // userId is optional on GHL's side - omit if this identity has no
       // resolved ghlUserId (e.g. leadership entries that were never given one).
       const result = await createNote(contactId, { body, userId: identity.ghlUserId || undefined });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'update_task',
+    'Edit an existing follow-up task on a contact/lead - title, description, and/or due date. Use get_contact_tasks first to find the right task ID. Only include the fields the user actually wants changed; anything omitted is left untouched. Use this when explicitly asked to update/reschedule/edit a task - never edit tasks proactively without being asked, same principle as create_task. Non-leadership users can only update tasks on their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID this task belongs to'),
+      taskId: z.string().describe('The GHL task ID, from get_contact_tasks'),
+      title: z.string().optional().describe('New task title - omit to leave unchanged'),
+      body: z.string().optional().describe('New task description/details - omit to leave unchanged'),
+      dueDate: z.string().optional().describe('New due date in ISO 8601 format, e.g. 2026-08-01T09:00:00-04:00 - omit to leave unchanged'),
+    },
+    async ({ contactId, taskId, title, body, dueDate }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      if (title === undefined && body === undefined && dueDate === undefined) {
+        return { content: [{ type: 'text', text: 'Error: must provide at least one of title, body, or dueDate.' }], isError: true };
+      }
+      const result = await updateTask(contactId, taskId, { title, body, dueDate });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'complete_task',
+    'Mark a follow-up task on a contact/lead as completed. Use get_contact_tasks first to find the right task ID if the user doesn\'t already know it. Only use this when a broker explicitly says a task is done - e.g. "mark that as done," "I called Barry, complete that task" - never mark something complete on inference alone. Non-leadership users can only complete tasks on their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID this task belongs to'),
+      taskId: z.string().describe('The GHL task ID, from get_contact_tasks'),
+    },
+    async ({ contactId, taskId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await completeTask(contactId, taskId);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );

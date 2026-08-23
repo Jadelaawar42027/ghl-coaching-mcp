@@ -352,6 +352,41 @@ export async function createTask(contactId, { title, body, assignedTo, dueDate }
   return res.json();
 }
 
+export async function updateTask(contactId, taskId, { title, body, dueDate } = {}) {
+  const update = {};
+  if (title !== undefined) update.title = title;
+  if (body !== undefined) update.body = body;
+  if (dueDate !== undefined) update.dueDate = dueDate;
+
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(update),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on update task: ${errBody}`);
+  }
+
+  return res.json();
+}
+
+export async function completeTask(contactId, taskId) {
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ completed: true }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on complete task: ${errBody}`);
+  }
+
+  return res.json();
+}
+
 export async function createNote(contactId, { body, userId }) {
   const res = await fetch(`${BASE_URL}/contacts/${contactId}/notes`, {
     method: 'POST',
