@@ -26,6 +26,7 @@ import {
   assertMessageAccess,
   filterByOwnership,
   isLeadership,
+  canViewAll,
   AccessDeniedError,
 } from './access.js';
 
@@ -35,19 +36,23 @@ function denied(err) {
 
 /**
  * Registers all GHL coaching tools on a given McpServer instance, scoped to the
- * given identity. identity = { name, role: 'leadership' | 'broker', ghlUserId }.
- * Leadership sees everything. Brokers are restricted to contacts/deals assigned
- * to their own ghlUserId - enforced here, not just in the system prompt, so it
- * holds even if a broker tries to ask around it.
+ * given identity. identity = { name, role: 'leadership' | 'broker' | 'setter', ghlUserId }.
+ * Leadership sees and edits everything. Setters get the same broad READ access as
+ * leadership (any contact/conversation/notes/tasks/opportunities) but are restricted
+ * like brokers on WRITE tools (create/edit tasks, notes, priority, stage, reassignment) -
+ * see the `canViewAll` vs default (leadership-only) bypass passed to each access check
+ * below. Brokers are restricted to contacts/deals assigned to their own ghlUserId on
+ * both reads and writes - enforced here, not just in the system prompt, so it holds
+ * even if someone tries to ask around it.
  */
 export function registerTools(server, identity) {
   server.tool(
     'search_contacts',
-    'Search GHL contacts by name, email, or phone. Returns contact IDs needed for other tools. Use this first when the user refers to a lead/customer by name. Non-leadership users only see contacts assigned to them.',
+    'Search GHL contacts by name, email, or phone. Returns contact IDs needed for other tools. Use this first when the user refers to a lead/customer by name. Non-leadership brokers only see contacts assigned to them; setters can search and view all contacts (read-only).',
     { query: z.string().describe('Name, email, or phone number to search for') },
     async ({ query }) => {
       const results = await searchContacts(query);
-      const scoped = filterByOwnership(results, identity);
+      const scoped = filterByOwnership(results, identity, 'assignedTo', canViewAll);
       return { content: [{ type: 'text', text: JSON.stringify(scoped, null, 2) }] };
     }
   );
@@ -58,7 +63,7 @@ export function registerTools(server, identity) {
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
-        await assertContactAccess(contactId, identity);
+        await assertContactAccess(contactId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -74,7 +79,7 @@ export function registerTools(server, identity) {
     { conversationId: z.string().describe('The GHL conversation ID') },
     async ({ conversationId }) => {
       try {
-        await assertConversationAccess(conversationId, identity);
+        await assertConversationAccess(conversationId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -90,7 +95,7 @@ export function registerTools(server, identity) {
     { messageId: z.string().describe('The message ID of the call, from the conversation timeline') },
     async ({ messageId }) => {
       try {
-        await assertMessageAccess(messageId, identity);
+        await assertMessageAccess(messageId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -112,10 +117,10 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_broker_leads_overview',
-    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, showing-booked outcome, Lead Priority status (Buy Now/Active/Nurture/Low Priority/On Hold/Closed - the primary prioritization signal), and Hot flag (a separate boolean marking especially urgent buying signals within any priority tier). Does NOT include message text or transcripts. Non-leadership users can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied.',
+    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, showing-booked outcome, Lead Priority status (Buy Now/Active/Nurture/Low Priority/On Hold/Closed - the primary prioritization signal), and Hot flag (a separate boolean marking especially urgent buying signals within any priority tier). Does NOT include message text or transcripts. Non-leadership brokers can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied. Setters can request any broker\'s overview (read-only).',
     { brokerId: z.string().describe('The GHL user ID of the broker, from list_brokers') },
     async ({ brokerId }) => {
-      if (!isLeadership(identity) && brokerId !== identity.ghlUserId) {
+      if (!canViewAll(identity) && brokerId !== identity.ghlUserId) {
         return denied(new Error('You can only view your own lead overview. Cross-broker performance data is restricted to leadership.'));
       }
       const results = await getBrokerLeadsOverview(brokerId);
@@ -135,14 +140,14 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_opportunities_by_stage',
-    'Get all leads/opportunities currently sitting in a specific pipeline stage. Returns contact IDs which can then be used with get_conversations, get_conversation_timeline, and get_call_transcript to analyze those specific leads. Non-leadership users only see opportunities assigned to them.',
+    'Get all leads/opportunities currently sitting in a specific pipeline stage. Returns contact IDs which can then be used with get_conversations, get_conversation_timeline, and get_call_transcript to analyze those specific leads. Non-leadership brokers only see opportunities assigned to them; setters see all opportunities (read-only).',
     {
       pipelineId: z.string().describe('The pipeline ID, from list_pipelines'),
       stageId: z.string().describe('The stage ID within that pipeline, from list_pipelines'),
     },
     async ({ pipelineId, stageId }) => {
       const results = await getOpportunitiesByStage(pipelineId, stageId);
-      const scoped = filterByOwnership(results, identity);
+      const scoped = filterByOwnership(results, identity, 'assignedTo', canViewAll);
       return { content: [{ type: 'text', text: JSON.stringify(scoped, null, 2) }] };
     }
   );
@@ -239,11 +244,11 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_contact_tasks',
-    'Get open and completed tasks for a contact/lead, including due dates. Use this to check whether a lead has a defined next action: if there are no open (incomplete) tasks, that lead has no next step, which is worth flagging - every active lead should have one. Also use this to find tasks due today. Non-leadership users can only check tasks on their own contacts.',
+    'Get open and completed tasks for a contact/lead, including due dates. Use this to check whether a lead has a defined next action: if there are no open (incomplete) tasks, that lead has no next step, which is worth flagging - every active lead should have one. Also use this to find tasks due today. Non-leadership brokers can only check tasks on their own contacts; setters can check tasks on any contact (read-only).',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
-        await assertContactAccess(contactId, identity);
+        await assertContactAccess(contactId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -255,11 +260,11 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_contact_notes',
-    'Get all notes logged on a contact/lead, most relevant for catching updates that happened outside the tracked conversation channels - e.g. a broker reporting they called on a personal cell, or that a showing/deal milestone happened, gets logged here even though it won\'t show up as an inbound/outbound message. ALWAYS check this alongside get_conversation_timeline and get_last_broker_contact_date before concluding a lead has been neglected or has no recent activity - a lead can look stale by message data alone while a recent note shows real progress. Non-leadership users can only check notes on their own contacts.',
+    'Get all notes logged on a contact/lead, most relevant for catching updates that happened outside the tracked conversation channels - e.g. a broker reporting they called on a personal cell, or that a showing/deal milestone happened, gets logged here even though it won\'t show up as an inbound/outbound message. ALWAYS check this alongside get_conversation_timeline and get_last_broker_contact_date before concluding a lead has been neglected or has no recent activity - a lead can look stale by message data alone while a recent note shows real progress. Non-leadership brokers can only check notes on their own contacts; setters can check notes on any contact (read-only).',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
-        await assertContactAccess(contactId, identity);
+        await assertContactAccess(contactId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -296,11 +301,11 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_last_broker_contact_date',
-    'Get the date of the most recent OUTBOUND message (broker -> lead) for a contact - the real, automatic signal for "when did the broker last actually reach out," derived from real message data rather than anything manually logged. Use this to check whether a lead is overdue for their priority tier\'s expected cadence (Buy Now: contact almost daily; Active: regular/weekly follow-up; Nurture: occasional). Returns null if there has never been an outbound message. Non-leadership users can only check their own contacts.',
+    'Get the date of the most recent OUTBOUND message (broker -> lead) for a contact - the real, automatic signal for "when did the broker last actually reach out," derived from real message data rather than anything manually logged. Use this to check whether a lead is overdue for their priority tier\'s expected cadence (Buy Now: contact almost daily; Active: regular/weekly follow-up; Nurture: occasional). Returns null if there has never been an outbound message. Non-leadership brokers can only check their own contacts; setters can check any contact (read-only).',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
-        await assertContactAccess(contactId, identity);
+        await assertContactAccess(contactId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
@@ -312,11 +317,11 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_opportunities_for_contact',
-    'Get all opportunities (deals) for a specific contact, including which pipeline/stage each is currently in. Use this before update_opportunity_stage to find the right opportunity ID and confirm its current pipeline/stage. Non-leadership users can only check their own contacts.',
+    'Get all opportunities (deals) for a specific contact, including which pipeline/stage each is currently in. Use this before update_opportunity_stage to find the right opportunity ID and confirm its current pipeline/stage. Non-leadership brokers can only check their own contacts; setters can check any contact (read-only).',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
-        await assertContactAccess(contactId, identity);
+        await assertContactAccess(contactId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
