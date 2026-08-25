@@ -35,11 +35,16 @@ async function requireAuth(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized - invalid or expired token' });
   }
 
-  if (identity.role !== 'leadership' && identity.role !== 'broker') {
+  if (identity.role !== 'leadership' && identity.role !== 'broker' && identity.role !== 'setter') {
     return res.status(401).json({ error: 'Unauthorized - malformed identity token' });
   }
 
-  if (identity.role === 'broker') {
+  // Setters need ghlUserId resolved too, same as brokers: the write-tool
+  // ownership checks in access.js (create_task, add_note, update_task,
+  // etc.) compare contact.assignedTo against identity.ghlUserId, and
+  // setters are write-restricted to their own contacts just like brokers -
+  // only their READ access is broadened to everyone (see canViewAll).
+  if (identity.role === 'broker' || identity.role === 'setter') {
     try {
       identity.ghlUserId = await resolveGhlUserId(identity.name);
     } catch (err) {
