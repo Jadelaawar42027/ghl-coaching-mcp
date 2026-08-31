@@ -214,15 +214,32 @@ export async function listUsers() {
 }
 
 export async function getContactsByOwner(ownerId, limit = 100) {
-  const data = await ghlPost('/contacts/search', {
-    locationId: LOCATION_ID,
-    page: 1,
-    pageLimit: limit,
-    filters: [{ field: 'assignedTo', operator: 'eq', value: ownerId }],
-  });
+  // Loops all pages rather than just the first - a broker with more than
+  // `limit` assigned contacts used to have everything past page 1 silently
+  // dropped. Stops as soon as a page comes back shorter than `limit` (no
+  // more pages left); MAX_PAGES is just a safety net against an unexpected
+  // API loop, not an expected real limit.
+  const MAX_PAGES = 20;
+  const allContacts = [];
 
-  const contacts = data.contacts || [];
-  return contacts.map((c) => {
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const data = await ghlPost('/contacts/search', {
+      locationId: LOCATION_ID,
+      page,
+      pageLimit: limit,
+      filters: [{ field: 'assignedTo', operator: 'eq', value: ownerId }],
+    });
+
+    const contacts = data.contacts || [];
+    allContacts.push(...contacts);
+
+    if (contacts.length < limit) break;
+    if (page === MAX_PAGES) {
+      console.warn(`getContactsByOwner: hit the ${MAX_PAGES}-page safety cap for owner ${ownerId} - some contacts may still be missing.`);
+    }
+  }
+
+  return allContacts.map((c) => {
     const outcomeField = (c.customFields || []).find((f) => f.id === OUTCOME_FIELD_ID);
     return {
       id: c.id,
@@ -237,6 +254,7 @@ export async function getContactsByOwner(ownerId, limit = 100) {
 
 export async function getBrokerLeadsOverview(ownerId) {
   const contacts = await getContactsByOwner(ownerId);
+  console.log(`getBrokerLeadsOverview: fetched ${contacts.length} contact(s) for owner ${ownerId}.`);
   const overview = [];
 
   for (const contact of contacts) {
