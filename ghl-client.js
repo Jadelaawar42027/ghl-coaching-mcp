@@ -340,6 +340,21 @@ export async function updateOpportunityStage(opportunityId, pipelineStageId) {
   return res.json();
 }
 
+export async function updateOpportunityValue(opportunityId, monetaryValue) {
+  const res = await fetch(`${BASE_URL}/opportunities/${opportunityId}`, {
+    method: 'PUT',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ monetaryValue }),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on update opportunity value: ${errBody}`);
+  }
+
+  return res.json();
+}
+
 export async function reassignContact(contactId, newAssignedToUserId) {
   const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
     method: 'PUT',

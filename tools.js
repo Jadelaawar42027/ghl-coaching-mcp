@@ -18,6 +18,7 @@ import {
   getLastOutboundMessageDate,
   getOpportunitiesForContact,
   updateOpportunityStage,
+  updateOpportunityValue,
   reassignContact,
 } from './ghl-client.js';
 import {
@@ -317,7 +318,7 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_opportunities_for_contact',
-    'Get all opportunities (deals) for a specific contact, including which pipeline/stage each is currently in. Use this before update_opportunity_stage to find the right opportunity ID and confirm its current pipeline/stage. Non-leadership brokers can only check their own contacts; setters can check any contact (read-only).',
+    'Get all opportunities (deals) for a specific contact, including which pipeline/stage each is currently in and its monetary value (budget). Use this before update_opportunity_stage or update_opportunity_value to find the right opportunity ID and confirm its current stage/value. Non-leadership brokers can only check their own contacts; setters can check any contact (read-only).',
     { contactId: z.string().describe('The GHL contact ID') },
     async ({ contactId }) => {
       try {
@@ -347,6 +348,26 @@ export function registerTools(server, identity) {
         throw err;
       }
       const result = await updateOpportunityStage(opportunityId, stageId);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'update_opportunity_value',
+    'Update an opportunity\'s (deal\'s) monetary value - this is the lead\'s budget/deal value field in GHL. Use get_opportunities_for_contact first to find the right opportunity ID and confirm the current value. Only use this when explicitly asked to update a lead\'s budget/deal value (e.g. a broker relaying a new number the client gave them) - never change it based on your own inference from conversation alone. Non-leadership users can only update opportunities belonging to their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID this opportunity belongs to, used to verify ownership'),
+      opportunityId: z.string().describe('The opportunity ID, from get_opportunities_for_contact'),
+      monetaryValue: z.number().describe('The new monetary value (budget/deal value) for this opportunity'),
+    },
+    async ({ contactId, opportunityId, monetaryValue }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await updateOpportunityValue(opportunityId, monetaryValue);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
