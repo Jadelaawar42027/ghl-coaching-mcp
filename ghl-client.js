@@ -261,13 +261,27 @@ export async function getBrokerLeadsOverview(ownerId) {
     try {
       const conversations = await getConversationsForContact(contact.id);
       if (conversations.length === 0) {
-        overview.push({ ...contact, touches: 0, calls: 0 });
+        overview.push({ ...contact, touches: 0, calls: 0, lastOutboundMessageDate: null });
         await sleep(150);
         continue;
       }
       const messages = await getConversationMessages(conversations[0].id, 100);
       const calls = messages.filter((m) => m.type === 'TYPE_CALL');
-      overview.push({ ...contact, touches: messages.length, calls: calls.length });
+      // Folded in from getLastOutboundMessageDate (reuses the messages already fetched above
+      // for touches/calls, instead of a separate get_last_broker_contact_date round-trip per
+      // lead later during a digest scan) - scoped to this contact's PRIMARY conversation
+      // thread only (conversations[0]), same scope as touches/calls above. The standalone
+      // getLastOutboundMessageDate function checks ALL of a contact's conversation threads,
+      // so it stays more thorough for a one-off deep-dive on a single contact; most contacts
+      // only have one thread in practice, so this is the same answer the overwhelming
+      // majority of the time at a fraction of the cost across a broker's whole lead list.
+      let lastOutboundMessageDate = null;
+      for (const m of messages) {
+        if (m.direction === 'outbound' && (!lastOutboundMessageDate || new Date(m.dateAdded) > new Date(lastOutboundMessageDate))) {
+          lastOutboundMessageDate = m.dateAdded;
+        }
+      }
+      overview.push({ ...contact, touches: messages.length, calls: calls.length, lastOutboundMessageDate });
     } catch (err) {
       overview.push({ ...contact, error: err.message });
     }
