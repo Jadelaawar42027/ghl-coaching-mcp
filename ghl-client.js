@@ -261,7 +261,7 @@ export async function getBrokerLeadsOverview(ownerId) {
     try {
       const conversations = await getConversationsForContact(contact.id);
       if (conversations.length === 0) {
-        overview.push({ ...contact, touches: 0, calls: 0, lastOutboundMessageDate: null });
+        overview.push({ ...contact, touches: 0, calls: 0, lastOutboundMessageDate: null, lastTouchDate: null });
         await sleep(150);
         continue;
       }
@@ -276,12 +276,22 @@ export async function getBrokerLeadsOverview(ownerId) {
       // only have one thread in practice, so this is the same answer the overwhelming
       // majority of the time at a fraction of the cost across a broker's whole lead list.
       let lastOutboundMessageDate = null;
+      let lastTouchDate = null;
       for (const m of messages) {
+        if (!lastTouchDate || new Date(m.dateAdded) > new Date(lastTouchDate)) {
+          lastTouchDate = m.dateAdded;
+        }
         if (m.direction === 'outbound' && (!lastOutboundMessageDate || new Date(m.dateAdded) > new Date(lastOutboundMessageDate))) {
           lastOutboundMessageDate = m.dateAdded;
         }
       }
-      overview.push({ ...contact, touches: messages.length, calls: calls.length, lastOutboundMessageDate });
+      // lastTouchDate: most recent message in EITHER direction - catches a lead whose only
+      // recent activity was an inbound reply, or a follow-up that happened through an
+      // untracked channel and never produced a logged outbound message. Used alongside
+      // lastOutboundMessageDate specifically so a cost-saving pre-filter (skipping a deep
+      // notes/timeline read on an obviously-dead lead) can't mistake "no logged outbound
+      // message" for "no real activity" - see digest.js's morning digest instructions.
+      overview.push({ ...contact, touches: messages.length, calls: calls.length, lastOutboundMessageDate, lastTouchDate });
     } catch (err) {
       overview.push({ ...contact, error: err.message });
     }
