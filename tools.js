@@ -20,6 +20,7 @@ import {
   updateOpportunityStage,
   updateOpportunityValue,
   reassignContact,
+  createContact,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -30,6 +31,7 @@ import {
   canViewAll,
   AccessDeniedError,
 } from './access.js';
+import { resolveGhlUserId, UserResolutionError } from './brokerResolver.js';
 
 function denied(err) {
   return { content: [{ type: 'text', text: `Access denied: ${err.message}` }], isError: true };
@@ -55,6 +57,55 @@ export function registerTools(server, identity) {
       const results = await searchContacts(query);
       const scoped = filterByOwnership(results, identity, 'assignedTo', canViewAll);
       return { content: [{ type: 'text', text: JSON.stringify(scoped, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'create_contact',
+    'Create a brand new contact/lead in GHL. Use this any time the user expresses an intent to add someone to the CRM in natural language - not one fixed phrase, e.g. "create a contact for John, his number is 555-123-4567", "add a new lead, Sarah Miller, sarah@email.com", "I just met someone named Mike, make a contact, here\'s his number", "can you make an account for this guy". Extract whatever name and phone/email the user gives you - you need at least a first name and one of phone or email; if both are missing, ask rather than guessing. New contacts are assigned to the caller by default: brokers and setters always get themselves. Leadership also defaults to themselves, but since leadership monitors brokers rather than working leads directly, if leadership says who this contact is actually for (e.g. "create this contact and put it under Charlie"), pass assignedToBrokerName instead - non-leadership callers cannot use assignedToBrokerName, a contact they create always goes to them. If GHL already has a contact with this phone or email (this account blocks duplicate contacts), the result comes back as alreadyExists:true with the EXISTING contact\'s ID instead of a new one - tell the user plainly that this person is already in the CRM rather than claiming you created a new contact.',
+    {
+      firstName: z.string().describe('Contact\'s first name'),
+      lastName: z.string().optional().describe('Contact\'s last name, if given'),
+      phone: z.string().optional().describe('Phone number, in whatever format the user gave it - pass it through as-is'),
+      email: z.string().optional().describe('Email address, if given'),
+      assignedToBrokerName: z.string().optional().describe('Leadership only: assign this new contact to a specific broker by name (resolved via list_brokers) instead of to yourself'),
+    },
+    async ({ firstName, lastName, phone, email, assignedToBrokerName }) => {
+      if (!phone && !email) {
+        return { content: [{ type: 'text', text: 'Error: need at least a phone number or an email to create a contact.' }], isError: true };
+      }
+      if (assignedToBrokerName && !isLeadership(identity)) {
+        return denied(new Error('Only leadership can assign a new contact to someone else - a contact you create always goes to you.'));
+      }
+
+      let assignedTo = identity.ghlUserId || undefined;
+      if (assignedToBrokerName) {
+        try {
+          assignedTo = await resolveGhlUserId(assignedToBrokerName);
+        } catch (err) {
+          if (err instanceof UserResolutionError) return denied(err);
+          throw err;
+        }
+      } else if (!assignedTo && isLeadership(identity)) {
+        // Leadership caller with no GHL user account of their own (e.g. no
+        // corresponding user in list_brokers) - fall back to unassigned
+        // rather than failing the whole request.
+        try {
+          assignedTo = await resolveGhlUserId(identity.name);
+        } catch (err) {
+          assignedTo = undefined;
+        }
+      }
+
+      try {
+        const result = await createContact({ firstName, lastName, phone, email, assignedTo });
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        if (err.existingContactId) {
+          return { content: [{ type: 'text', text: JSON.stringify({ alreadyExists: true, existingContactId: err.existingContactId, message: err.message }, null, 2) }] };
+        }
+        throw err;
+      }
     }
   );
 

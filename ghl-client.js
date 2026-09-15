@@ -379,6 +379,57 @@ export async function updateOpportunityValue(opportunityId, monetaryValue) {
   return res.json();
 }
 
+/**
+ * Creates a brand new contact/lead in GHL. assignedTo is optional - a
+ * contact can be created unassigned (e.g. leadership with no GHL user
+ * account of their own, so there's no one to assign it to).
+ *
+ * GHL blocks creating a second contact with the same phone/email when the
+ * location has duplicate-contact prevention on (true here) - it responds
+ * with a 400 whose body carries the EXISTING contact's ID rather than a
+ * plain validation error. Surface that distinctly (via err.existingContactId)
+ * so the caller can report "this person's already in the CRM" instead of a
+ * generic failure.
+ */
+export async function createContact({ firstName, lastName, phone, email, assignedTo }) {
+  const body = {
+    locationId: LOCATION_ID,
+    firstName,
+    ...(lastName ? { lastName } : {}),
+    ...(phone ? { phone } : {}),
+    ...(email ? { email } : {}),
+    ...(assignedTo ? { assignedTo } : {}),
+    source: 'AI Assistant',
+  };
+
+  const res = await fetch(`${BASE_URL}/contacts/`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const existingId = data?.meta?.contactId;
+    if (res.status === 400 && existingId) {
+      const err = new Error(`A contact with this phone/email already exists in GHL (id ${existingId}) - duplicate contacts are blocked on this account.`);
+      err.existingContactId = existingId;
+      throw err;
+    }
+    throw new Error(`GHL API error ${res.status} on create contact: ${JSON.stringify(data)}`);
+  }
+
+  const c = data.contact || data;
+  return {
+    id: c.id,
+    name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
+    phone: c.phone || null,
+    email: c.email || null,
+    assignedTo: c.assignedTo || null,
+  };
+}
+
 export async function reassignContact(contactId, newAssignedToUserId) {
   const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
     method: 'PUT',
