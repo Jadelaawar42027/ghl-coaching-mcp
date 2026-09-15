@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import {
   searchContacts,
+  getContactById,
   getConversationsForContact,
   getConversationMessages,
   getCallTranscript,
@@ -21,6 +22,7 @@ import {
   updateOpportunityValue,
   reassignContact,
   createContact,
+  createOpportunity,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -62,15 +64,16 @@ export function registerTools(server, identity) {
 
   server.tool(
     'create_contact',
-    'Create a brand new contact/lead in GHL. Use this any time the user expresses an intent to add someone to the CRM in natural language - not one fixed phrase, e.g. "create a contact for John, his number is 555-123-4567", "add a new lead, Sarah Miller, sarah@email.com", "I just met someone named Mike, make a contact, here\'s his number", "can you make an account for this guy". Extract whatever name and phone/email the user gives you - you need at least a first name and one of phone or email; if both are missing, ask rather than guessing. New contacts are assigned to the caller by default: brokers and setters always get themselves. Leadership also defaults to themselves, but since leadership monitors brokers rather than working leads directly, if leadership says who this contact is actually for (e.g. "create this contact and put it under Charlie"), pass assignedToBrokerName instead - non-leadership callers cannot use assignedToBrokerName, a contact they create always goes to them. If GHL already has a contact with this phone or email (this account blocks duplicate contacts), the result comes back as alreadyExists:true with the EXISTING contact\'s ID instead of a new one - tell the user plainly that this person is already in the CRM rather than claiming you created a new contact.',
+    'Create a brand new contact/lead in GHL. Use this any time the user expresses an intent to add someone to the CRM in natural language - not one fixed phrase, e.g. "create a contact for John, his number is 555-123-4567", "add a new lead, Sarah Miller, sarah@email.com", "I just met someone named Mike, make a contact, here\'s his number", "can you make an account for this guy". Extract whatever name and phone/email the user gives you - you need at least a first name and one of phone or email; if both are missing, ask rather than guessing. New contacts are assigned to the caller by default: brokers and setters always get themselves. Leadership also defaults to themselves, but since leadership monitors brokers rather than working leads directly, if leadership says who this contact is actually for (e.g. "create this contact and put it under Charlie"), pass assignedToBrokerName instead - non-leadership callers cannot use assignedToBrokerName, a contact they create always goes to them. This tool ONLY creates the contact record - it does NOT add them to a pipeline/stage as an opportunity, even if the user mentions a pipeline/stage/source in the same message; use create_opportunity separately for that (with this tool\'s returned contact ID), only if the user actually asks for it. If GHL already has a contact with this phone or email (this account blocks duplicate contacts), the result comes back as alreadyExists:true with the EXISTING contact\'s ID instead of a new one - tell the user plainly that this person is already in the CRM rather than claiming you created a new contact.',
     {
       firstName: z.string().describe('Contact\'s first name'),
       lastName: z.string().optional().describe('Contact\'s last name, if given'),
       phone: z.string().optional().describe('Phone number, in whatever format the user gave it - pass it through as-is'),
       email: z.string().optional().describe('Email address, if given'),
+      source: z.string().optional().describe('Where this lead came from (GHL\'s built-in contact source field, free text) - e.g. "Referral", "Instagram DM", "Walk-in". Only set this if the user actually says where the lead came from - defaults to "AI Assistant" if omitted.'),
       assignedToBrokerName: z.string().optional().describe('Leadership only: assign this new contact to a specific broker by name (resolved via list_brokers) instead of to yourself'),
     },
-    async ({ firstName, lastName, phone, email, assignedToBrokerName }) => {
+    async ({ firstName, lastName, phone, email, source, assignedToBrokerName }) => {
       if (!phone && !email) {
         return { content: [{ type: 'text', text: 'Error: need at least a phone number or an email to create a contact.' }], isError: true };
       }
@@ -98,7 +101,7 @@ export function registerTools(server, identity) {
       }
 
       try {
-        const result = await createContact({ firstName, lastName, phone, email, assignedTo });
+        const result = await createContact({ firstName, lastName, phone, email, source, assignedTo });
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         if (err.existingContactId) {
@@ -106,6 +109,44 @@ export function registerTools(server, identity) {
         }
         throw err;
       }
+    }
+  );
+
+  server.tool(
+    'create_opportunity',
+    'Create a new opportunity (deal) in a specific pipeline/stage for an existing contact - use this when the user explicitly asks to add someone to a pipeline, e.g. "add John to the Buyer pipeline, Qualifying stage" or "put Sarah\'s deal in at $500k, source Instagram DM". Never call this automatically just because create_contact mentioned a pipeline/stage/source in the same message - only when the user actually asks to create the opportunity/deal itself, as a separate action. Use list_pipelines first to resolve pipelineId/pipelineStageId by name, and search_contacts or create_contact to get the contactId. Non-leadership users can only create opportunities for their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID this opportunity is for, from search_contacts or create_contact'),
+      pipelineId: z.string().describe('The pipeline ID, from list_pipelines'),
+      pipelineStageId: z.string().describe('The stage ID within that pipeline, from list_pipelines'),
+      name: z.string().optional().describe('Opportunity name - defaults to the contact\'s name if omitted'),
+      monetaryValue: z.number().optional().describe('Deal value/budget, if known'),
+      source: z.string().optional().describe('Where this lead/deal came from (GHL\'s built-in opportunity source field, free text) - e.g. "Referral", "Instagram DM", "Walk-in". Only set this if the user actually says it.'),
+    },
+    async ({ contactId, pipelineId, pipelineStageId, name, monetaryValue, source }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      let opportunityName = name;
+      if (!opportunityName) {
+        const contact = await getContactById(contactId);
+        opportunityName = contact.name || 'New Opportunity';
+      }
+
+      const assignedTo = identity.ghlUserId || undefined;
+      const result = await createOpportunity({
+        contactId,
+        pipelineId,
+        pipelineStageId,
+        name: opportunityName,
+        monetaryValue,
+        source,
+        assignedTo,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
 

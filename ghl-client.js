@@ -380,6 +380,48 @@ export async function updateOpportunityValue(opportunityId, monetaryValue) {
 }
 
 /**
+ * Creates a new opportunity (deal) in a pipeline/stage for an existing
+ * contact. Use listPipelines to resolve pipelineId/pipelineStageId by name
+ * first - same convention as updateOpportunityStage.
+ */
+export async function createOpportunity({ contactId, pipelineId, pipelineStageId, name, monetaryValue, source, assignedTo }) {
+  const body = {
+    locationId: LOCATION_ID,
+    contactId,
+    pipelineId,
+    pipelineStageId,
+    name,
+    status: 'open',
+    ...(monetaryValue !== undefined ? { monetaryValue } : {}),
+    ...(source ? { source } : {}),
+    ...(assignedTo ? { assignedTo } : {}),
+  };
+
+  const res = await fetch(`${BASE_URL}/opportunities/`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on create opportunity: ${errBody}`);
+  }
+
+  const data = await res.json();
+  const o = data.opportunity || data;
+  return {
+    id: o.id,
+    contactId: o.contactId,
+    name: o.name,
+    pipelineId: o.pipelineId,
+    pipelineStageId: o.pipelineStageId,
+    monetaryValue: o.monetaryValue,
+    status: o.status,
+  };
+}
+
+/**
  * Creates a brand new contact/lead in GHL. assignedTo is optional - a
  * contact can be created unassigned (e.g. leadership with no GHL user
  * account of their own, so there's no one to assign it to).
@@ -391,7 +433,7 @@ export async function updateOpportunityValue(opportunityId, monetaryValue) {
  * so the caller can report "this person's already in the CRM" instead of a
  * generic failure.
  */
-export async function createContact({ firstName, lastName, phone, email, assignedTo }) {
+export async function createContact({ firstName, lastName, phone, email, assignedTo, source }) {
   const body = {
     locationId: LOCATION_ID,
     firstName,
@@ -399,7 +441,7 @@ export async function createContact({ firstName, lastName, phone, email, assigne
     ...(phone ? { phone } : {}),
     ...(email ? { email } : {}),
     ...(assignedTo ? { assignedTo } : {}),
-    source: 'AI Assistant',
+    source: source || 'AI Assistant',
   };
 
   const res = await fetch(`${BASE_URL}/contacts/`, {
@@ -427,6 +469,7 @@ export async function createContact({ firstName, lastName, phone, email, assigne
     phone: c.phone || null,
     email: c.email || null,
     assignedTo: c.assignedTo || null,
+    source: c.source || null,
   };
 }
 
