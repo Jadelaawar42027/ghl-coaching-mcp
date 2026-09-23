@@ -482,4 +482,62 @@ export function registerTools(server, identity) {
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
+
+  // Buyer Pipeline's "Reactivation Leads" stage - see list_pipelines. Hardcoded rather than
+  // resolved by name on every call, same convention as the Buyer Pipeline ID hardcoded in the
+  // WhatsApp bot's budgetBackfill.js - this pipeline's structure only changes when someone
+  // edits it in the GHL pipeline builder, not per-request.
+  const BUYER_PIPELINE_ID = 'yp2TxpYmvRutPkNuoP69';
+  const REACTIVATION_STAGE_ID = '38e75d33-3228-46e0-b789-a8d7e85c20e3';
+
+  server.tool(
+    'reactivate_lead',
+    'Send a lead to reactivation: moves its Buyer Pipeline opportunity to the "Reactivation Leads" stage AND reassigns the contact to Karim Timani (the setter, who owns follow-up on reactivation leads) - one combined action for both steps. Use this when a broker says something like "reactivate this lead," "send [name] to reactivation," or "sign [name] up for reactivation" - resolve the contact with search_contacts first (the boat/yacht they mentioned is just context to help you pick the right contact/opportunity if the client has more than one, not something to record). Non-leadership users can only reactivate their OWN contacts - this is effectively giving the lead up to Karim, same restriction as reassign_contact. Fails with a clear error if the contact has no opportunity in the Buyer Pipeline (nothing to move) - never guess which opportunity to move if there is more than one Buyer Pipeline match.',
+    {
+      contactId: z.string().describe('The GHL contact ID, from search_contacts'),
+    },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+
+      const opportunities = await getOpportunitiesForContact(contactId);
+      const buyerOpps = opportunities.filter((o) => o.pipelineId === BUYER_PIPELINE_ID);
+      if (buyerOpps.length === 0) {
+        return { content: [{ type: 'text', text: 'Error: this contact has no opportunity in the Buyer Pipeline - nothing to move to Reactivation Leads.' }], isError: true };
+      }
+      if (buyerOpps.length > 1) {
+        return { content: [{ type: 'text', text: `Error: this contact has ${buyerOpps.length} opportunities in the Buyer Pipeline - ask which one before reactivating rather than guessing.` }], isError: true };
+      }
+
+      let karimUserId;
+      try {
+        karimUserId = await resolveGhlUserId('Karim Timani');
+      } catch (err) {
+        if (err instanceof UserResolutionError) return denied(err);
+        throw err;
+      }
+
+      // Move the stage BEFORE reassigning - assertContactAccess above only holds while the
+      // broker still owns the contact; moving the stage after handing it to Karim would fail
+      // that same check for a non-leadership caller.
+      await updateOpportunityStage(buyerOpps[0].id, REACTIVATION_STAGE_ID);
+      const reassignResult = await reassignContact(contactId, karimUserId);
+
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({
+            opportunityId: buyerOpps[0].id,
+            movedToStage: 'Reactivation Leads',
+            reassignedTo: 'Karim Timani',
+            contact: reassignResult,
+          }, null, 2),
+        }],
+      };
+    }
+  );
 }
