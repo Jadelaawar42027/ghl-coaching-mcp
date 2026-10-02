@@ -17,6 +17,7 @@ import {
   getContactNotes,
   updateLeadStatus,
   getLastOutboundMessageDate,
+  getLastOutboundCallRecord,
   getOpportunitiesForContact,
   updateOpportunityStage,
   updateOpportunityValue,
@@ -405,6 +406,22 @@ export function registerTools(server, identity) {
       }
       const lastDate = await getLastOutboundMessageDate(contactId);
       return { content: [{ type: 'text', text: JSON.stringify({ lastOutboundMessageDate: lastDate }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'has_outbound_call_record',
+    'Checks whether a contact has ANY outbound call (broker -> lead) actually logged in GHL, across ALL of that contact\'s conversation threads. Use this before reviewing a call that was just marked "Call Performed" in GHL - that field can get set even when the broker called off-CRM (e.g. their personal cell), in which case there\'s no call record here to review at all. Returns { hasCall: boolean, lastCall: { messageId, dateAdded } | null }. Non-leadership brokers can only check their own contacts; setters can check any contact (read-only).',
+    { contactId: z.string().describe('The GHL contact ID') },
+    async ({ contactId }) => {
+      try {
+        await assertContactAccess(contactId, identity, canViewAll);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const lastCall = await getLastOutboundCallRecord(contactId);
+      return { content: [{ type: 'text', text: JSON.stringify({ hasCall: !!lastCall, lastCall }, null, 2) }] };
     }
   );
 

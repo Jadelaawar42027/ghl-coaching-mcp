@@ -178,6 +178,31 @@ export async function getLastOutboundMessageDate(contactId) {
   return latest;
 }
 
+/**
+ * Checks whether a contact has ANY outbound call (broker -> lead, messageType TYPE_CALL) logged
+ * across ALL of their conversation threads - not just the primary one, same thoroughness as
+ * getLastOutboundMessageDate above. Used to catch a lead whose outcome is marked "Call
+ * Performed" in GHL but who has no actual call record in the CRM at all - meaning the broker
+ * called off-CRM (e.g. their personal cell) and there's nothing here to review. Returns the
+ * most recent such call's { messageId, dateAdded }, or null if there's never been one.
+ */
+export async function getLastOutboundCallRecord(contactId) {
+  const conversations = await getConversationsForContact(contactId);
+  if (conversations.length === 0) return null;
+
+  let latest = null;
+  for (const convo of conversations) {
+    const messages = await getConversationMessages(convo.id, 100);
+    const outboundCalls = messages.filter((m) => m.type === 'TYPE_CALL' && m.direction === 'outbound');
+    for (const m of outboundCalls) {
+      if (!latest || new Date(m.dateAdded) > new Date(latest.dateAdded)) {
+        latest = { messageId: m.id, dateAdded: m.dateAdded };
+      }
+    }
+  }
+  return latest;
+}
+
 export async function getMessage(messageId) {
   const data = await ghlGet(`/conversations/messages/${messageId}`);
   const m = data.message || data;
