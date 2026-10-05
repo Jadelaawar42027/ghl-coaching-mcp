@@ -192,6 +192,7 @@ export async function getConversationMessages(conversationId, limit = 50) {
     dateAdded: m.dateAdded,
     body: m.body || fetchedBodies.get(m.id) || null,
     status: m.status || null,
+    durationSeconds: m.meta?.call?.duration ?? null,
   }));
 }
 
@@ -237,7 +238,7 @@ export async function getLastOutboundCallRecord(contactId) {
     const outboundCalls = messages.filter((m) => m.type === 'TYPE_CALL' && m.direction === 'outbound');
     for (const m of outboundCalls) {
       if (!latest || new Date(m.dateAdded) > new Date(latest.dateAdded)) {
-        latest = { messageId: m.id, dateAdded: m.dateAdded };
+        latest = { messageId: m.id, dateAdded: m.dateAdded, durationSeconds: m.durationSeconds };
       }
     }
   }
