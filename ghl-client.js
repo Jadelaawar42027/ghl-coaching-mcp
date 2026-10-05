@@ -270,13 +270,24 @@ export async function getCallTranscript(messageId) {
   return `${directionNote}\n\nNote: speaker labels below are based on audio channel, not identity - use self-introductions in the dialogue to confirm who is speaking rather than assuming a fixed mapping.\n\n${transcriptText}`;
 }
 
+// /users/search leaves out some active location users (confirmed for Peter Shaarda and Shelly
+// Melcher - both load fine by ID), so those are added explicitly by ID.
+const EXTRA_USER_IDS = ['MBQ0PWk0hNfytP4eoohE', 'u4HBNud6rK0HyezX9l1a'];
+
 export async function listUsers() {
   const data = await ghlGet('/users/search', { companyId: COMPANY_ID, locationId: LOCATION_ID });
-  return (data.users || []).map((u) => ({
+  const users = (data.users || []).map((u) => ({
     id: u.id,
     name: `${u.firstName || ''} ${u.lastName || ''}`.trim(),
     email: u.email,
   }));
+  const seen = new Set(users.map((u) => u.id));
+  for (const id of EXTRA_USER_IDS) {
+    if (seen.has(id)) continue;
+    const u = await ghlGet(`/users/${id}`);
+    users.push({ id: u.id, name: `${u.firstName || ''} ${u.lastName || ''}`.trim(), email: u.email });
+  }
+  return users;
 }
 
 export async function getContactsByOwner(ownerId, limit = 100) {
