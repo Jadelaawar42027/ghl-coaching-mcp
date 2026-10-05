@@ -24,6 +24,7 @@ import {
   reassignContact,
   createContact,
   createOpportunity,
+  sendSmsToContact,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -148,6 +149,29 @@ export function registerTools(server, identity) {
         assignedTo,
       });
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'send_sms',
+    'Send an SMS to a lead - ONLY the exact text the broker has approved (chosen from a draft they picked and confirmed). Never send text you composed on the spot or changed after approval. The SMS goes out from the contact\'s assigned user\'s number. Non-leadership users can only text their own contacts. Refuses if the contact has no phone or has opted out of SMS, and messages must be 320 characters or fewer.',
+    {
+      contactId: z.string().describe('The GHL contact ID to text'),
+      message: z.string().max(320).describe('The approved SMS text, exactly as approved'),
+    },
+    async ({ contactId, message }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      try {
+        const result = await sendSmsToContact(contactId, message);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return { content: [{ type: 'text', text: `Could not send: ${err.message}` }], isError: true };
+      }
     }
   );
 

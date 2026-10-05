@@ -696,3 +696,26 @@ export async function updateLeadStatus(contactId, { priority, hot } = {}) {
 
   return res.json();
 }
+// Sends one SMS to a contact. GHL sends it from the contact's assigned user's number, which is
+// the behavior we verified in production. Refuses contacts with no phone or SMS opt-out on file.
+export async function sendSmsToContact(contactId, message) {
+  const contactRes = await fetch(`${BASE_URL}/contacts/${contactId}`, { headers: headers() });
+  if (!contactRes.ok) throw new Error(`Could not load contact ${contactId} (${contactRes.status}).`);
+  const contact = (await contactRes.json()).contact;
+  if (!contact?.phone) throw new Error('This contact has no phone number on file.');
+  if (contact.dnd === true || contact.dndSettings?.SMS?.status === 'active') {
+    throw new Error('This contact has opted out of SMS (do not disturb is on).');
+  }
+
+  const res = await fetch(`${BASE_URL}/conversations/messages`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type: 'SMS', contactId, message }),
+  });
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`GHL API error ${res.status} on send SMS: ${errBody}`);
+  }
+  const data = await res.json();
+  return { messageId: data.messageId || data.id || null, conversationId: data.conversationId || null };
+}
