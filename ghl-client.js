@@ -141,15 +141,56 @@ export async function getConversationsForContact(contactId) {
   }));
 }
 
+// Inbound (and some outbound) emails come back from the conversation list with NO body - the
+// text only exists on the single-message endpoint, as raw HTML. Without fetching it here, the AI
+// reading a timeline never sees an email's contents at all (e.g. "I'm on vacation until Oct 6"
+// shows up as an empty TYPE_EMAIL entry). Bounded to the most recent emails so a long thread
+// can't turn into dozens of extra calls.
+const EMAIL_BODY_FETCH_CAP = 10;
+const EMAIL_BODY_MAX_CHARS = 2000;
+
+function htmlToText(html) {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<head[\s\S]*?<\/head>/gi, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s*\n+/g, '\n')
+    .trim();
+}
+
 export async function getConversationMessages(conversationId, limit = 50) {
   const data = await ghlGet(`/conversations/${conversationId}/messages`, { limit });
   const messages = (data.messages?.messages || data.messages || []);
+
+  const emailsNeedingBody = messages
+    .filter((m) => m.messageType === 'TYPE_EMAIL' && !m.body)
+    .slice(0, EMAIL_BODY_FETCH_CAP);
+  const fetchedBodies = new Map();
+  for (const m of emailsNeedingBody) {
+    try {
+      const single = await ghlGet(`/conversations/messages/${m.id}`);
+      const raw = (single.message || single).body || '';
+      fetchedBodies.set(m.id, htmlToText(raw).slice(0, EMAIL_BODY_MAX_CHARS));
+    } catch (err) {
+      fetchedBodies.set(m.id, null);
+    }
+  }
+
   return messages.map((m) => ({
     id: m.id,
     type: m.messageType,
     direction: m.direction,
     dateAdded: m.dateAdded,
-    body: m.body || null,
+    body: m.body || fetchedBodies.get(m.id) || null,
     status: m.status || null,
   }));
 }
