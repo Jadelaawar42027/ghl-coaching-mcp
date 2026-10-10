@@ -122,7 +122,36 @@ export async function getContactById(contactId) {
     assignedTo: c.assignedTo || null,
     priority: extractCustomField(c, PRIORITY_FIELD_ID),
     hot: extractHotFlag(c),
+    tags: c.tags || [],
   };
+}
+
+/**
+ * Adds one or more tags to a contact. GHL merges with whatever tags already exist (confirmed in
+ * production - never clobbers them), and is idempotent re-adding a tag that's already there.
+ * Returns the contact's full tag list after the add.
+ */
+export async function addTagsToContact(contactId, tags) {
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tags`, {
+    method: 'POST',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  });
+  if (!res.ok) throw new Error(`GHL API error ${res.status} on add tags: ${await res.text()}`);
+  const data = await res.json();
+  return { tags: data.tags || [], tagsAdded: data.tagsAdded || [] };
+}
+
+/** Removes one or more tags from a contact. Removing a tag that isn't there is a no-op. */
+export async function removeTagsFromContact(contactId, tags) {
+  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tags`, {
+    method: 'DELETE',
+    headers: { ...headers(), 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tags }),
+  });
+  if (!res.ok) throw new Error(`GHL API error ${res.status} on remove tags: ${await res.text()}`);
+  const data = await res.json();
+  return { tags: data.tags || [], tagsRemoved: data.tagsRemoved || [] };
 }
 
 export async function getConversationById(conversationId) {

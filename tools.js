@@ -25,6 +25,8 @@ import {
   createContact,
   createOpportunity,
   sendSmsToContact,
+  addTagsToContact,
+  removeTagsFromContact,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -172,6 +174,72 @@ export function registerTools(server, identity) {
       } catch (err) {
         return { content: [{ type: 'text', text: `Could not send: ${err.message}` }], isError: true };
       }
+    }
+  );
+
+  server.tool(
+    'add_tags',
+    'Adds one or more tags to a contact (e.g. for a campaign like "flibs-2026"). Merges with whatever tags the contact already has - never removes existing ones. Adding a tag that\'s already there is harmless. Non-leadership users can only tag their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID'),
+      tags: z.array(z.string()).min(1).describe('Tag(s) to add, e.g. ["flibs-2026"]'),
+    },
+    async ({ contactId, tags }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await addTagsToContact(contactId, tags);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'remove_tags',
+    'Removes one or more tags from a contact. Removing a tag that isn\'t there is harmless. Non-leadership users can only untag their own contacts.',
+    {
+      contactId: z.string().describe('The GHL contact ID'),
+      tags: z.array(z.string()).min(1).describe('Tag(s) to remove'),
+    },
+    async ({ contactId, tags }) => {
+      try {
+        await assertContactAccess(contactId, identity);
+      } catch (err) {
+        if (err instanceof AccessDeniedError) return denied(err);
+        throw err;
+      }
+      const result = await removeTagsFromContact(contactId, tags);
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    'bulk_add_tags',
+    'Adds the same tag(s) to many contacts at once - e.g. tagging every lead on a FLIBS list with "flibs-2026" in one call instead of one tool call per lead. Checks ownership per contact and skips (reporting why) any contact that fails that check rather than failing the whole batch. Capped at 100 contacts per call.',
+    {
+      contactIds: z.array(z.string()).min(1).max(100).describe('GHL contact IDs to tag'),
+      tags: z.array(z.string()).min(1).describe('Tag(s) to add to every contact in the list'),
+    },
+    async ({ contactIds, tags }) => {
+      const results = [];
+      for (const contactId of contactIds) {
+        try {
+          await assertContactAccess(contactId, identity);
+        } catch (err) {
+          results.push({ contactId, ok: false, reason: err instanceof AccessDeniedError ? 'access_denied' : err.message });
+          continue;
+        }
+        try {
+          await addTagsToContact(contactId, tags);
+          results.push({ contactId, ok: true });
+        } catch (err) {
+          results.push({ contactId, ok: false, reason: err.message });
+        }
+      }
+      const succeeded = results.filter((r) => r.ok).length;
+      return { content: [{ type: 'text', text: JSON.stringify({ succeeded, failed: results.length - succeeded, results }, null, 2) }] };
     }
   );
 
