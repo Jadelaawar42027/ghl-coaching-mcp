@@ -36,6 +36,9 @@ export async function assertContactAccess(contactId, identity, bypass = isLeader
   }
 
   if (!contact.assignedTo || contact.assignedTo !== identity.ghlUserId) {
+    console.warn(
+      `Access denied: contact ${contactId} has assignedTo=${contact.assignedTo || 'null'}, but caller ${identity.name} (${identity.role}) resolved to ghlUserId=${identity.ghlUserId || 'null'}.`
+    );
     throw new AccessDeniedError('This contact is not assigned to you. Only leadership can view other brokers\' contacts.');
   }
 }
