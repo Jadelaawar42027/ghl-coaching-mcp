@@ -39,10 +39,6 @@ import {
 } from './access.js';
 import { resolveGhlUserId, UserResolutionError } from './brokerResolver.js';
 
-function denied(err) {
-  return { content: [{ type: 'text', text: `Access denied: ${err.message}` }], isError: true };
-}
-
 /**
  * Registers all GHL coaching tools on a given McpServer instance, scoped to the
  * given identity. identity = { name, role: 'leadership' | 'broker' | 'setter', ghlUserId }.
@@ -55,6 +51,14 @@ function denied(err) {
  * even if someone tries to ask around it.
  */
 export function registerTools(server, identity) {
+  // Logs every denial centrally (identity + the specific reason) so a broker report like
+  // "it said I couldn't do that" is diagnosable server-side without needing a per-call-site log
+  // at all 26+ places this gets returned from below.
+  function denied(err) {
+    console.warn(`Denied for ${identity.name} (${identity.role}): ${err.message}`);
+    return { content: [{ type: 'text', text: `Access denied: ${err.message}` }], isError: true };
+  }
+
   server.tool(
     'search_contacts',
     'Search GHL contacts by name, email, or phone. Returns contact IDs needed for other tools. Use this first when the user refers to a lead/customer by name. Non-leadership brokers only see contacts assigned to them; setters can search and view all contacts (read-only).',
@@ -106,11 +110,14 @@ export function registerTools(server, identity) {
 
       try {
         const result = await createContact({ firstName, lastName, phone, email, source, assignedTo });
+        console.log(`create_contact: ${identity.name} created ${result.id} (${firstName} ${lastName || ''}) assignedTo=${assignedTo || 'none'}`);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         if (err.existingContactId) {
+          console.warn(`create_contact: ${identity.name} tried to create a duplicate of ${err.existingContactId} (${firstName} ${lastName || ''})`);
           return { content: [{ type: 'text', text: JSON.stringify({ alreadyExists: true, existingContactId: err.existingContactId, message: err.message }, null, 2) }] };
         }
+        console.error(`create_contact: ${identity.name} failed for ${firstName} ${lastName || ''}:`, err.message);
         throw err;
       }
     }
@@ -141,15 +148,22 @@ export function registerTools(server, identity) {
       }
 
       const assignedTo = identity.ghlUserId || undefined;
-      const result = await createOpportunity({
-        contactId,
-        pipelineId,
-        pipelineStageId,
-        name: opportunityName,
-        monetaryValue,
-        source,
-        assignedTo,
-      });
+      let result;
+      try {
+        result = await createOpportunity({
+          contactId,
+          pipelineId,
+          pipelineStageId,
+          name: opportunityName,
+          monetaryValue,
+          source,
+          assignedTo,
+        });
+      } catch (err) {
+        console.error(`create_opportunity: ${identity.name} failed for contact ${contactId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not create opportunity: ${err.message}` }], isError: true };
+      }
+      console.log(`create_opportunity: ${identity.name} created ${result.id} for contact ${contactId} in stage ${pipelineStageId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -170,8 +184,10 @@ export function registerTools(server, identity) {
       }
       try {
         const result = await sendSmsToContact(contactId, message);
+        console.log(`send_sms: ${identity.name} sent to contact ${contactId} (${message.length} chars)`);
         return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
+        console.error(`send_sms: ${identity.name} failed for contact ${contactId}:`, err.message);
         return { content: [{ type: 'text', text: `Could not send: ${err.message}` }], isError: true };
       }
     }
@@ -191,7 +207,14 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await addTagsToContact(contactId, tags);
+      let result;
+      try {
+        result = await addTagsToContact(contactId, tags);
+      } catch (err) {
+        console.error(`add_tags: ${identity.name} failed to add [${tags.join(', ')}] to contact ${contactId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not add tags: ${err.message}` }], isError: true };
+      }
+      console.log(`add_tags: ${identity.name} added [${tags.join(', ')}] to contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -210,7 +233,14 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await removeTagsFromContact(contactId, tags);
+      let result;
+      try {
+        result = await removeTagsFromContact(contactId, tags);
+      } catch (err) {
+        console.error(`remove_tags: ${identity.name} failed to remove [${tags.join(', ')}] from contact ${contactId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not remove tags: ${err.message}` }], isError: true };
+      }
+      console.log(`remove_tags: ${identity.name} removed [${tags.join(', ')}] from contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -239,7 +269,12 @@ export function registerTools(server, identity) {
         }
       }
       const succeeded = results.filter((r) => r.ok).length;
-      return { content: [{ type: 'text', text: JSON.stringify({ succeeded, failed: results.length - succeeded, results }, null, 2) }] };
+      const failed = results.length - succeeded;
+      console.log(`bulk_add_tags: ${identity.name} tagged [${tags.join(', ')}] on ${succeeded}/${results.length} contact(s)`);
+      if (failed > 0) {
+        console.warn(`bulk_add_tags: ${identity.name} had ${failed} failure(s): ${JSON.stringify(results.filter((r) => !r.ok))}`);
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ succeeded, failed, results }, null, 2) }] };
     }
   );
 
@@ -358,7 +393,14 @@ export function registerTools(server, identity) {
       if (!isLeadership(identity) && assignedTo !== identity.ghlUserId) {
         return denied(new Error('Non-leadership users can only assign tasks to themselves.'));
       }
-      const result = await createTask(contactId, { title, body, assignedTo, dueDate });
+      let result;
+      try {
+        result = await createTask(contactId, { title, body, assignedTo, dueDate });
+      } catch (err) {
+        console.error(`create_task: ${identity.name} failed on contact ${contactId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not create task: ${err.message}` }], isError: true };
+      }
+      console.log(`create_task: ${identity.name} created "${title}" on contact ${contactId}, due ${dueDate}, assigned to ${assignedTo}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -379,7 +421,14 @@ export function registerTools(server, identity) {
       }
       // userId is optional on GHL's side - omit if this identity has no
       // resolved ghlUserId (e.g. leadership entries that were never given one).
-      const result = await createNote(contactId, { body, userId: identity.ghlUserId || undefined });
+      let result;
+      try {
+        result = await createNote(contactId, { body, userId: identity.ghlUserId || undefined });
+      } catch (err) {
+        console.error(`add_note: ${identity.name} failed on contact ${contactId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not add note: ${err.message}` }], isError: true };
+      }
+      console.log(`add_note: ${identity.name} added a note (${body.length} chars) on contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -404,7 +453,14 @@ export function registerTools(server, identity) {
       if (title === undefined && body === undefined && dueDate === undefined) {
         return { content: [{ type: 'text', text: 'Error: must provide at least one of title, body, or dueDate.' }], isError: true };
       }
-      const result = await updateTask(contactId, taskId, { title, body, dueDate });
+      let result;
+      try {
+        result = await updateTask(contactId, taskId, { title, body, dueDate });
+      } catch (err) {
+        console.error(`update_task: ${identity.name} failed on task ${taskId} (contact ${contactId}):`, err.message);
+        return { content: [{ type: 'text', text: `Could not update task: ${err.message}` }], isError: true };
+      }
+      console.log(`update_task: ${identity.name} updated task ${taskId} on contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -423,7 +479,14 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await completeTask(contactId, taskId);
+      let result;
+      try {
+        result = await completeTask(contactId, taskId);
+      } catch (err) {
+        console.error(`complete_task: ${identity.name} failed on task ${taskId} (contact ${contactId}):`, err.message);
+        return { content: [{ type: 'text', text: `Could not complete task: ${err.message}` }], isError: true };
+      }
+      console.log(`complete_task: ${identity.name} completed task ${taskId} on contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -480,7 +543,14 @@ export function registerTools(server, identity) {
       if (priority === undefined && hot === undefined) {
         return { content: [{ type: 'text', text: 'Error: must provide at least one of priority or hot.' }], isError: true };
       }
-      const result = await updateLeadStatus(contactId, { priority, hot });
+      let result;
+      try {
+        result = await updateLeadStatus(contactId, { priority, hot });
+      } catch (err) {
+        console.error(`update_lead_status: ${identity.name} failed on contact ${contactId} (priority=${priority ?? 'unchanged'}, hot=${hot ?? 'unchanged'}):`, err.message);
+        return { content: [{ type: 'text', text: `Could not update lead status: ${err.message}` }], isError: true };
+      }
+      console.log(`update_lead_status: ${identity.name} set contact ${contactId} to priority=${priority ?? 'unchanged'}, hot=${hot ?? 'unchanged'}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -548,7 +618,14 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await updateOpportunityStage(opportunityId, stageId);
+      let result;
+      try {
+        result = await updateOpportunityStage(opportunityId, stageId);
+      } catch (err) {
+        console.error(`update_opportunity_stage: ${identity.name} failed on opportunity ${opportunityId} (contact ${contactId}):`, err.message);
+        return { content: [{ type: 'text', text: `Could not update opportunity stage: ${err.message}` }], isError: true };
+      }
+      console.log(`update_opportunity_stage: ${identity.name} moved opportunity ${opportunityId} (contact ${contactId}) to stage ${stageId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -568,7 +645,14 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await updateOpportunityValue(opportunityId, monetaryValue);
+      let result;
+      try {
+        result = await updateOpportunityValue(opportunityId, monetaryValue);
+      } catch (err) {
+        console.error(`update_opportunity_value: ${identity.name} failed on opportunity ${opportunityId} (contact ${contactId}):`, err.message);
+        return { content: [{ type: 'text', text: `Could not update opportunity value: ${err.message}` }], isError: true };
+      }
+      console.log(`update_opportunity_value: ${identity.name} set opportunity ${opportunityId} (contact ${contactId}) to ${monetaryValue}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -587,7 +671,18 @@ export function registerTools(server, identity) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const result = await reassignContact(contactId, newAssignedToUserId);
+      // Fetch the current owner before reassigning purely for the log line below - this is
+      // exactly the kind of handoff (assignedTo silently changing) that caused confusion in the
+      // Jay Johnson / Jeffery Anderson ownership mix-up, so it's worth a clear from->to record.
+      const previousOwner = await getContactById(contactId).then((c) => c.assignedTo).catch(() => 'unknown');
+      let result;
+      try {
+        result = await reassignContact(contactId, newAssignedToUserId);
+      } catch (err) {
+        console.error(`reassign_contact: ${identity.name} failed to reassign contact ${contactId} from ${previousOwner} to ${newAssignedToUserId}:`, err.message);
+        return { content: [{ type: 'text', text: `Could not reassign contact: ${err.message}` }], isError: true };
+      }
+      console.log(`reassign_contact: ${identity.name} reassigned contact ${contactId} from ${previousOwner} to ${newAssignedToUserId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     }
   );
@@ -633,8 +728,20 @@ export function registerTools(server, identity) {
       // Move the stage BEFORE reassigning - assertContactAccess above only holds while the
       // broker still owns the contact; moving the stage after handing it to Karim would fail
       // that same check for a non-leadership caller.
-      await updateOpportunityStage(buyerOpps[0].id, REACTIVATION_STAGE_ID);
-      const reassignResult = await reassignContact(contactId, karimUserId);
+      try {
+        await updateOpportunityStage(buyerOpps[0].id, REACTIVATION_STAGE_ID);
+      } catch (err) {
+        console.error(`reactivate_lead: ${identity.name} failed moving opportunity ${buyerOpps[0].id} (contact ${contactId}) to Reactivation Leads:`, err.message);
+        return { content: [{ type: 'text', text: `Could not reactivate: stage move failed (${err.message}). Contact was NOT reassigned.` }], isError: true };
+      }
+      let reassignResult;
+      try {
+        reassignResult = await reassignContact(contactId, karimUserId);
+      } catch (err) {
+        console.error(`reactivate_lead: ${identity.name} moved contact ${contactId} to Reactivation Leads but reassign to Karim (${karimUserId}) failed:`, err.message);
+        return { content: [{ type: 'text', text: `Stage was moved to Reactivation Leads, but reassigning to Karim failed (${err.message}) - contact is now in an inconsistent state, fix the assignment manually.` }], isError: true };
+      }
+      console.log(`reactivate_lead: ${identity.name} reactivated contact ${contactId} (opportunity ${buyerOpps[0].id}) - moved to Reactivation Leads and reassigned to Karim (${karimUserId})`);
 
       return {
         content: [{

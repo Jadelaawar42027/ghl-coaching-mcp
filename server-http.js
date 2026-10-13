@@ -79,7 +79,16 @@ app.post('/mcp', requireAuth, async (req, res) => {
     await server.connect(transport);
     await transport.handleRequest(req, res, req.body);
   } catch (err) {
-    console.error('MCP request error:', err);
+    // Safety net for anything a tool handler didn't catch itself - every write tool logs its
+    // own success/failure (see tools.js), but this covers read tools and any gap in that
+    // coverage, with the caller identity and the exact tool call attempted.
+    const toolName = req.body?.params?.name;
+    const toolArgs = req.body?.params?.arguments;
+    console.error(
+      `MCP request error for ${req.identity?.name} (${req.identity?.role})` +
+        (toolName ? ` calling ${toolName}(${JSON.stringify(toolArgs)})` : '') + ':',
+      err
+    );
     if (!res.headersSent) {
       res.status(500).json({ error: 'Internal server error' });
     }
