@@ -64,7 +64,14 @@ export function registerTools(server, identity) {
     'Search GHL contacts by name, email, or phone. Returns contact IDs needed for other tools. Use this first when the user refers to a lead/customer by name. Non-leadership brokers only see contacts assigned to them; setters can search and view all contacts (read-only).',
     { query: z.string().describe('Name, email, or phone number to search for') },
     async ({ query }) => {
-      const results = await searchContacts(query);
+      // Scope the search itself at the GHL API level for non-leadership/setter callers (see
+      // searchContacts) rather than relying only on the client-side filter below - a broker's
+      // own contact can otherwise get crowded out of the raw top-N results by other brokers'
+      // similarly-named contacts before filterByOwnership ever runs. filterByOwnership stays as
+      // a defense-in-depth no-op when the search is already scoped, same fail-closed philosophy
+      // as the rest of access.js.
+      const ownerId = canViewAll(identity) ? null : identity.ghlUserId;
+      const results = await searchContacts(query, 10, ownerId);
       const scoped = filterByOwnership(results, identity, 'assignedTo', canViewAll);
       return { content: [{ type: 'text', text: JSON.stringify(scoped, null, 2) }] };
     }

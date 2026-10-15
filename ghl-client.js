@@ -100,8 +100,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function searchContacts(query, limit = 10) {
-  const data = await ghlGet('/contacts/', { locationId: LOCATION_ID, query, limit });
+/**
+ * Searches contacts by name/email/phone. When ownerId is given, the search is scoped AT THE
+ * GHL API LEVEL via a server-side assignedTo filter - NOT just filtered client-side after the
+ * fact. This matters: the plain /contacts/ text search ranks matches globally across the whole
+ * location, so a broker's own correctly-assigned contact can rank outside the top `limit`
+ * results if enough other brokers' contacts share a similar name - a client-side-only filter
+ * would then see zero results for that broker even though their contact genuinely exists and is
+ * genuinely theirs (confirmed live: searching "jeffery" unscoped returned 6 contacts across 5
+ * different owners before any filtering). Passing ownerId here means GHL itself only returns
+ * that broker's own matches, so the broker's contact is never at risk of getting crowded out.
+ */
+export async function searchContacts(query, limit = 10, ownerId = null) {
+  const data = ownerId
+    ? await ghlPost('/contacts/search', {
+        locationId: LOCATION_ID,
+        pageLimit: limit,
+        query,
+        filters: [{ field: 'assignedTo', operator: 'eq', value: ownerId }],
+      })
+    : await ghlGet('/contacts/', { locationId: LOCATION_ID, query, limit });
   return (data.contacts || []).map((c) => ({
     id: c.id,
     name: c.contactName || `${c.firstName || ''} ${c.lastName || ''}`.trim(),
