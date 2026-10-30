@@ -160,24 +160,6 @@ export async function addTagsToContact(contactId, tags) {
   return { tags: data.tags || [], tagsAdded: data.tagsAdded || [] };
 }
 
-// "FLIBS2026 Tracking Buttons" contact field (RADIO). Brokers mark leads who came to the show.
-const FLIBS_FIELD_ID = '6KB4zWhne2bfV7RJ9F4N';
-// Marking stays open through Sunday Nov 2, 2026 (Eastern), the day after FLIBS ends.
-export const FLIBS_MARKING_ENDS_AT = Date.parse('2026-11-03T00:00:00-05:00');
-
-/** Sets a contact's FLIBS2026 Tracking Buttons field to "Showed". */
-export async function markFlibsShowed(contactId) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
-    method: 'PUT',
-    headers: { ...headers(), 'Content-Type': 'application/json' },
-    body: JSON.stringify({ customFields: [{ id: FLIBS_FIELD_ID, value: 'Showed' }] }),
-  });
-  if (!res.ok) throw new Error(`GHL API error ${res.status} on mark FLIBS showed: ${await res.text()}`);
-  const contact = (await res.json()).contact || {};
-  const name = [contact.firstName, contact.lastName].filter(Boolean).join(' ') || contact.contactName || null;
-  return { contactId, name, flibs2026: 'Showed' };
-}
-
 /** Removes one or more tags from a contact. Removing a tag that isn't there is a no-op. */
 export async function removeTagsFromContact(contactId, tags) {
   const res = await fetch(`${BASE_URL}/contacts/${contactId}/tags`, {

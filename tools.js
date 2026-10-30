@@ -27,8 +27,6 @@ import {
   sendSmsToContact,
   addTagsToContact,
   removeTagsFromContact,
-  markFlibsShowed,
-  FLIBS_MARKING_ENDS_AT,
 } from './ghl-client.js';
 import {
   assertContactAccess,
@@ -225,57 +223,6 @@ export function registerTools(server, identity) {
       }
       console.log(`add_tags: ${identity.name} added [${tags.join(', ')}] to contact ${contactId}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    }
-  );
-
-  // FLIBS 2026 (TEMPORARY - remove after Nov 2, 2026). Any broker can mark ANY lead as having shown
-  // up, not just their own: this skips the usual ownership check on purpose. It only ever writes the
-  // FLIBS2026 Tracking Buttons field - never reassigns the contact or touches anything else - and
-  // returns only name + last 4 phone digits for leads, so it doesn't expose other brokers' leads.
-  server.tool(
-    'mark_flibs_showed',
-    'FLIBS 2026 only (through Sunday Nov 2, 2026): marks a lead as having shown up at the show by setting their "FLIBS2026 Tracking Buttons" field to "Showed". Works on ANY lead in the CRM, not just the caller\'s own - do NOT use search_contacts first, pass the name straight to this tool, which searches the whole CRM itself. Pass `name` with the lead\'s name as the broker wrote it. If exactly one contact matches it is marked; if several match, the result lists candidates (name + last 4 phone digits) - ask the broker which one, then call again with that candidate\'s `contactId`. Does not reassign the lead or change anything else.',
-    {
-      name: z.string().optional().describe('The lead\'s name as the broker wrote it'),
-      contactId: z.string().optional().describe('A contact ID from this tool\'s own candidate list, once the broker has picked one'),
-    },
-    async ({ name, contactId }) => {
-      if (Date.now() >= FLIBS_MARKING_ENDS_AT) {
-        return { content: [{ type: 'text', text: 'FLIBS show-up marking closed after Nov 2, 2026.' }], isError: true };
-      }
-      const reply = (obj, isError = false) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }], isError });
-
-      let targetId = contactId;
-      if (!targetId) {
-        const query = (name || '').trim();
-        if (!query) return reply({ error: 'Pass the lead\'s name (or a contactId from a candidate list).' }, true);
-        const matches = await searchContacts(query, 10, null);
-        const wanted = query.toLowerCase().replace(/\s+/g, ' ');
-        const exact = matches.filter((c) => (c.name || '').toLowerCase().replace(/\s+/g, ' ') === wanted);
-        const pick = exact.length === 1 ? exact : matches.length === 1 ? matches : null;
-        if (!pick) {
-          return reply({
-            marked: false,
-            reason: matches.length === 0 ? 'no_match' : 'multiple_matches',
-            candidates: (exact.length > 1 ? exact : matches).map((c) => ({
-              contactId: c.id,
-              name: c.name,
-              phoneLast4: c.phone ? c.phone.replace(/\D/g, '').slice(-4) : null,
-            })),
-          });
-        }
-        targetId = pick[0].id;
-      }
-
-      let result;
-      try {
-        result = await markFlibsShowed(targetId);
-      } catch (err) {
-        console.error(`mark_flibs_showed: ${identity.name} failed on contact ${targetId}:`, err.message);
-        return reply({ error: `Could not mark as showed: ${err.message}` }, true);
-      }
-      console.log(`mark_flibs_showed: ${identity.name} marked contact ${targetId} (${result.name}) as Showed`);
-      return reply({ marked: true, ...result });
     }
   );
 
