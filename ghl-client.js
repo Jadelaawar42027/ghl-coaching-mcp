@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { AsyncLocalStorage } from 'node:async_hooks';
 
 const BASE_URL = 'https://services.leadconnectorhq.com';
 const API_VERSION = '2021-07-28';
@@ -65,13 +66,81 @@ function headers() {
   };
 }
 
+// --- Request timing / rate-limit logging ---------------------------------------------------
+// Every GHL call goes through timedFetch so a slow day can be diagnosed from the logs: is GHL
+// answering slowly, returning errors, or rate-limiting us (429 + x-ratelimit-* headers)?
+// Individual requests are only logged when slow or failed, to keep the logs readable;
+// getBrokerLeadsOverview also logs one summary line per call (see requestStats below).
+const SLOW_REQUEST_MS = Number(process.env.GHL_SLOW_REQUEST_MS) || 3000;
+const requestStats = new AsyncLocalStorage();
+
+function rateLimitInfo(res) {
+  const h = (name) => res.headers.get(name);
+  const parts = [
+    h('x-ratelimit-remaining') != null && `burst ${h('x-ratelimit-remaining')}/${h('x-ratelimit-max') ?? '?'}`,
+    h('x-ratelimit-daily-remaining') != null && `daily ${h('x-ratelimit-daily-remaining')}/${h('x-ratelimit-limit-daily') ?? '?'}`,
+    h('retry-after') != null && `retry-after ${h('retry-after')}`,
+  ].filter(Boolean);
+  return parts.length ? ` [${parts.join(', ')}]` : '';
+}
+
+async function timedFetch(url, init = {}) {
+  const method = init.method || 'GET';
+  const path = new URL(url).pathname;
+  const started = Date.now();
+  const stats = requestStats.getStore();
+  let res;
+  try {
+    res = await fetch(url, init);
+  } catch (err) {
+    const ms = Date.now() - started;
+    console.warn(`GHL ${method} ${path} network error after ${ms}ms: ${err.message}`);
+    if (stats) stats.record(ms, 'network-error');
+    throw err;
+  }
+  const ms = Date.now() - started;
+  if (stats) stats.record(ms, res.status, res.headers.get('x-ratelimit-remaining'));
+  if (!res.ok || ms >= SLOW_REQUEST_MS) {
+    console.warn(`GHL ${method} ${path} -> ${res.status} in ${ms}ms${rateLimitInfo(res)}`);
+  }
+  return res;
+}
+
+function createRequestStats() {
+  return {
+    count: 0,
+    totalMs: 0,
+    maxMs: 0,
+    slow: 0,
+    statuses: {},
+    minBurstRemaining: null,
+    record(ms, status, burstRemaining) {
+      this.count++;
+      this.totalMs += ms;
+      this.maxMs = Math.max(this.maxMs, ms);
+      if (ms >= SLOW_REQUEST_MS) this.slow++;
+      this.statuses[status] = (this.statuses[status] || 0) + 1;
+      const remaining = burstRemaining == null ? NaN : Number(burstRemaining);
+      if (!Number.isNaN(remaining)) {
+        this.minBurstRemaining = this.minBurstRemaining == null ? remaining : Math.min(this.minBurstRemaining, remaining);
+      }
+    },
+    summary() {
+      const avg = this.count ? Math.round(this.totalMs / this.count) : 0;
+      const statuses = Object.entries(this.statuses).map(([k, v]) => `${k}x${v}`).join(' ');
+      return `${this.count} GHL request(s), avg ${avg}ms, max ${this.maxMs}ms, ${this.slow} slow (>=${SLOW_REQUEST_MS}ms), ` +
+        `statuses ${statuses || 'none'}, lowest burst remaining ${this.minBurstRemaining ?? 'n/a'}`;
+    },
+  };
+}
+
 async function ghlGet(path, params = {}) {
   const url = new URL(`${BASE_URL}${path}`);
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null) url.searchParams.set(key, value);
   });
 
-  const res = await fetch(url, { headers: headers() });
+  const res = await timedFetch(url, { headers: headers() });
 
   if (!res.ok) {
     const body = await res.text();
@@ -82,7 +151,7 @@ async function ghlGet(path, params = {}) {
 }
 
 async function ghlPost(path, body) {
-  const res = await fetch(`${BASE_URL}${path}`, {
+  const res = await timedFetch(`${BASE_URL}${path}`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -150,7 +219,7 @@ export async function getContactById(contactId) {
  * Returns the contact's full tag list after the add.
  */
 export async function addTagsToContact(contactId, tags) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tags`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/tags`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ tags }),
@@ -162,7 +231,7 @@ export async function addTagsToContact(contactId, tags) {
 
 /** Removes one or more tags from a contact. Removing a tag that isn't there is a no-op. */
 export async function removeTagsFromContact(contactId, tags) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tags`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/tags`, {
     method: 'DELETE',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ tags }),
@@ -378,6 +447,18 @@ export async function getContactsByOwner(ownerId, limit = 100) {
 }
 
 export async function getBrokerLeadsOverview(ownerId) {
+  const stats = createRequestStats();
+  const started = Date.now();
+  const overview = await requestStats.run(stats, () => buildBrokerLeadsOverview(ownerId));
+  const failed = overview.filter((lead) => lead.error).length;
+  console.log(
+    `getBrokerLeadsOverview: owner ${ownerId} done in ${Math.round((Date.now() - started) / 1000)}s - ` +
+      `${overview.length} contact(s), ${failed} failed; ${stats.summary()}.`
+  );
+  return overview;
+}
+
+async function buildBrokerLeadsOverview(ownerId) {
   const contacts = await getContactsByOwner(ownerId);
   console.log(`getBrokerLeadsOverview: fetched ${contacts.length} contact(s) for owner ${ownerId}.`);
   const overview = [];
@@ -475,7 +556,7 @@ export async function getOpportunitiesForContact(contactId, limit = 20) {
 }
 
 export async function updateOpportunityStage(opportunityId, pipelineStageId) {
-  const res = await fetch(`${BASE_URL}/opportunities/${opportunityId}`, {
+  const res = await timedFetch(`${BASE_URL}/opportunities/${opportunityId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ pipelineStageId }),
@@ -490,7 +571,7 @@ export async function updateOpportunityStage(opportunityId, pipelineStageId) {
 }
 
 export async function updateOpportunityValue(opportunityId, monetaryValue) {
-  const res = await fetch(`${BASE_URL}/opportunities/${opportunityId}`, {
+  const res = await timedFetch(`${BASE_URL}/opportunities/${opportunityId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ monetaryValue }),
@@ -522,7 +603,7 @@ export async function createOpportunity({ contactId, pipelineId, pipelineStageId
     ...(assignedTo ? { assignedTo } : {}),
   };
 
-  const res = await fetch(`${BASE_URL}/opportunities/`, {
+  const res = await timedFetch(`${BASE_URL}/opportunities/`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -569,7 +650,7 @@ export async function createContact({ firstName, lastName, phone, email, assigne
     source: source || 'AI Assistant',
   };
 
-  const res = await fetch(`${BASE_URL}/contacts/`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -599,7 +680,7 @@ export async function createContact({ firstName, lastName, phone, email, assigne
 }
 
 export async function reassignContact(contactId, newAssignedToUserId) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ assignedTo: newAssignedToUserId }),
@@ -614,7 +695,7 @@ export async function reassignContact(contactId, newAssignedToUserId) {
 }
 
 export async function createTask(contactId, { title, body, assignedTo, dueDate }) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/tasks`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ title, body, assignedTo, dueDate, completed: false }),
@@ -634,7 +715,7 @@ export async function updateTask(contactId, taskId, { title, body, dueDate } = {
   if (body !== undefined) update.body = body;
   if (dueDate !== undefined) update.dueDate = dueDate;
 
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify(update),
@@ -649,7 +730,7 @@ export async function updateTask(contactId, taskId, { title, body, dueDate } = {
 }
 
 export async function completeTask(contactId, taskId) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/tasks/${taskId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ completed: true }),
@@ -664,7 +745,7 @@ export async function completeTask(contactId, taskId) {
 }
 
 export async function createNote(contactId, { body, userId }) {
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}/notes`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}/notes`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ body, userId }),
@@ -731,7 +812,7 @@ export async function updateLeadStatus(contactId, { priority, hot } = {}) {
     throw new Error('updateLeadStatus called with neither priority nor hot - nothing to update.');
   }
 
-  const res = await fetch(`${BASE_URL}/contacts/${contactId}`, {
+  const res = await timedFetch(`${BASE_URL}/contacts/${contactId}`, {
     method: 'PUT',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ customFields }),
@@ -747,7 +828,7 @@ export async function updateLeadStatus(contactId, { priority, hot } = {}) {
 // Sends one SMS to a contact. GHL sends it from the contact's assigned user's number, which is
 // the behavior we verified in production. Refuses contacts with no phone or SMS opt-out on file.
 export async function sendSmsToContact(contactId, message) {
-  const contactRes = await fetch(`${BASE_URL}/contacts/${contactId}`, { headers: headers() });
+  const contactRes = await timedFetch(`${BASE_URL}/contacts/${contactId}`, { headers: headers() });
   if (!contactRes.ok) throw new Error(`Could not load contact ${contactId} (${contactRes.status}).`);
   const contact = (await contactRes.json()).contact;
   if (!contact?.phone) throw new Error('This contact has no phone number on file.');
@@ -755,7 +836,7 @@ export async function sendSmsToContact(contactId, message) {
     throw new Error('This contact has opted out of SMS (do not disturb is on).');
   }
 
-  const res = await fetch(`${BASE_URL}/conversations/messages`, {
+  const res = await timedFetch(`${BASE_URL}/conversations/messages`, {
     method: 'POST',
     headers: { ...headers(), 'Content-Type': 'application/json' },
     body: JSON.stringify({ type: 'SMS', contactId, message }),
