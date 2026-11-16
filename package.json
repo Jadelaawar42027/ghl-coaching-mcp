@@ -6,7 +6,8 @@
   "scripts": {
     "start:stdio": "node server.js",
     "start:http": "node server-http.js",
-    "dev:http": "node --watch server-http.js"
+    "dev:http": "node --watch server-http.js",
+    "test": "node --test __tests__/*.test.js"
   },
   "keywords": [],
   "author": "",
