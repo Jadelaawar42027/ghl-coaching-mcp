@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { emailBodyToText } from './email-text.js';
 
 const BASE_URL = 'https://services.leadconnectorhq.com';
 const API_VERSION = '2021-07-28';
@@ -257,59 +258,92 @@ export async function getConversationsForContact(contactId) {
   }));
 }
 
-// Inbound (and some outbound) emails come back from the conversation list with NO body - the
-// text only exists on the single-message endpoint, as raw HTML. Without fetching it here, the AI
-// reading a timeline never sees an email's contents at all (e.g. "I'm on vacation until Oct 6"
-// shows up as an empty TYPE_EMAIL entry). Bounded to the most recent emails so a long thread
-// can't turn into dozens of extra calls.
-const EMAIL_BODY_FETCH_CAP = 10;
-const EMAIL_BODY_MAX_CHARS = 2000;
-
-function htmlToText(html) {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-    .replace(/<head[\s\S]*?<\/head>/gi, ' ')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|tr|li|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&amp;/gi, '&')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;/gi, "'")
-    .replace(/[ \t]+/g, ' ')
-    .replace(/\n\s*\n+/g, '\n')
-    .trim();
+// Emails in the conversation message list usually come back with NO body (or only a snippet).
+// The full email lives on the dedicated email endpoint, keyed by the ID(s) in meta.email.messageIds;
+// the generic single-message endpoint is the fallback. Every email is fetched (no cap) so the
+// digest never misses one, and a failed fetch is logged and marked on the message instead of
+// silently turning into an empty email.
+async function fetchEmailDetail(m) {
+  const emailIds = m.meta?.email?.messageIds || [];
+  const errors = [];
+  for (const emailId of [...emailIds].reverse()) {
+    try {
+      const data = await ghlGet(`/conversations/messages/email/${emailId}`);
+      const e = data.emailMessage || data.email || data;
+      if (e && (e.body || e.subject)) {
+        return { body: e.body || '', subject: e.subject || null, from: e.from || null, to: e.to || null, cc: e.cc || null };
+      }
+    } catch (err) {
+      errors.push(`email/${emailId}: ${err.message.slice(0, 120)}`);
+    }
+  }
+  try {
+    const single = await ghlGet(`/conversations/messages/${m.id}`);
+    const msg = single.message || single;
+    if (msg.body) return { body: msg.body, subject: msg.meta?.email?.subject || null, from: null, to: null, cc: null };
+    errors.push('generic endpoint returned no body');
+  } catch (err) {
+    errors.push(`messages/${m.id}: ${err.message.slice(0, 120)}`);
+  }
+  console.warn(`Email body unavailable for message ${m.id}: ${errors.join(' | ')}`);
+  return null;
 }
 
-export async function getConversationMessages(conversationId, limit = 50) {
-  const data = await ghlGet(`/conversations/${conversationId}/messages`, { limit });
-  const messages = (data.messages?.messages || data.messages || []);
+// Raw GHL messages for one conversation, newest first, paged until `limit` messages.
+async function listConversationMessagesRaw(conversationId, limit) {
+  const all = [];
+  let lastMessageId;
+  while (all.length < limit) {
+    const data = await ghlGet(`/conversations/${conversationId}/messages`, { limit: Math.min(100, limit - all.length), lastMessageId });
+    const page = data.messages?.messages || (Array.isArray(data.messages) ? data.messages : []);
+    all.push(...page);
+    if (!data.messages?.nextPage || page.length === 0) break;
+    lastMessageId = data.messages.lastMessageId;
+  }
+  return all;
+}
 
-  const emailsNeedingBody = messages
-    .filter((m) => m.messageType === 'TYPE_EMAIL' && !m.body)
-    .slice(0, EMAIL_BODY_FETCH_CAP);
-  const fetchedBodies = new Map();
-  for (const m of emailsNeedingBody) {
-    try {
-      const single = await ghlGet(`/conversations/messages/${m.id}`);
-      const raw = (single.message || single).body || '';
-      fetchedBodies.set(m.id, htmlToText(raw).slice(0, EMAIL_BODY_MAX_CHARS));
-    } catch (err) {
-      fetchedBodies.set(m.id, null);
+/**
+ * One conversation's messages (newest first, up to `limit`). Emails come back with their full
+ * readable body, subject, from and to unless withEmailBodies is false (date/count-only callers).
+ */
+export async function getConversationMessages(conversationId, limit = 100, { withEmailBodies = true } = {}) {
+  const messages = await listConversationMessagesRaw(conversationId, limit);
+
+  const emailDetails = new Map();
+  if (withEmailBodies) {
+    for (const m of messages.filter((x) => x.messageType === 'TYPE_EMAIL')) {
+      emailDetails.set(m.id, await fetchEmailDetail(m));
     }
   }
 
-  return messages.map((m) => ({
-    id: m.id,
-    type: m.messageType,
-    direction: m.direction,
-    dateAdded: m.dateAdded,
-    body: m.body || fetchedBodies.get(m.id) || null,
-    status: m.status || null,
-    durationSeconds: m.meta?.call?.duration ?? null,
-  }));
+  return messages.map((m) => {
+    const base = {
+      id: m.id,
+      type: m.messageType,
+      direction: m.direction,
+      dateAdded: m.dateAdded,
+      body: m.body || null,
+      status: m.status || null,
+      durationSeconds: m.meta?.call?.duration ?? null,
+    };
+    if (m.messageType !== 'TYPE_EMAIL' || !withEmailBodies) return base;
+    const detail = emailDetails.get(m.id);
+    if (!detail) {
+      return { ...base, body: m.body ? emailBodyToText(m.body).text : null, emailBodyUnavailable: true };
+    }
+    const { text, removedQuote, truncated } = emailBodyToText(detail.body || m.body || '');
+    return {
+      ...base,
+      subject: detail.subject,
+      from: detail.from,
+      to: detail.to,
+      cc: detail.cc,
+      body: text || null,
+      ...(removedQuote ? { quotedHistoryRemoved: true } : {}),
+      ...(truncated ? { truncated: true } : {}),
+    };
+  });
 }
 
 /**
@@ -325,7 +359,7 @@ export async function getLastOutboundMessageDate(contactId) {
 
   let latest = null;
   for (const convo of conversations) {
-    const messages = await getConversationMessages(convo.id, 100);
+    const messages = await getConversationMessages(convo.id, 100, { withEmailBodies: false });
     const outbound = messages.filter((m) => m.direction === 'outbound');
     for (const m of outbound) {
       if (!latest || new Date(m.dateAdded) > new Date(latest)) {
@@ -350,7 +384,7 @@ export async function getLastOutboundCallRecord(contactId) {
 
   let latest = null;
   for (const convo of conversations) {
-    const messages = await getConversationMessages(convo.id, 100);
+    const messages = await getConversationMessages(convo.id, 100, { withEmailBodies: false });
     const outboundCalls = messages.filter((m) => m.type === 'TYPE_CALL' && m.direction === 'outbound');
     for (const m of outboundCalls) {
       if (!latest || new Date(m.dateAdded) > new Date(latest.dateAdded)) {
@@ -471,16 +505,15 @@ async function buildBrokerLeadsOverview(ownerId) {
         await sleep(150);
         continue;
       }
-      const messages = await getConversationMessages(conversations[0].id, 100);
+      // Every thread on the contact, not just the first: an email-only thread (or a second SMS
+      // thread) is real activity and must count toward touches and the last-contact dates. Only
+      // dates and counts are needed here, so email bodies aren't fetched.
+      const messages = [];
+      for (const convo of conversations) {
+        messages.push(...(await getConversationMessages(convo.id, 100, { withEmailBodies: false })));
+      }
       const calls = messages.filter((m) => m.type === 'TYPE_CALL');
-      // Folded in from getLastOutboundMessageDate (reuses the messages already fetched above
-      // for touches/calls, instead of a separate get_last_broker_contact_date round-trip per
-      // lead later during a digest scan) - scoped to this contact's PRIMARY conversation
-      // thread only (conversations[0]), same scope as touches/calls above. The standalone
-      // getLastOutboundMessageDate function checks ALL of a contact's conversation threads,
-      // so it stays more thorough for a one-off deep-dive on a single contact; most contacts
-      // only have one thread in practice, so this is the same answer the overwhelming
-      // majority of the time at a fraction of the cost across a broker's whole lead list.
+      const emails = messages.filter((m) => m.type === 'TYPE_EMAIL');
       let lastOutboundMessageDate = null;
       let lastTouchDate = null;
       for (const m of messages) {
@@ -497,7 +530,7 @@ async function buildBrokerLeadsOverview(ownerId) {
       // lastOutboundMessageDate specifically so a cost-saving pre-filter (skipping a deep
       // notes/timeline read on an obviously-dead lead) can't mistake "no logged outbound
       // message" for "no real activity" - see digest.js's morning digest instructions.
-      overview.push({ ...contact, touches: messages.length, calls: calls.length, lastOutboundMessageDate, lastTouchDate });
+      overview.push({ ...contact, touches: messages.length, calls: calls.length, emails: emails.length, lastOutboundMessageDate, lastTouchDate });
     } catch (err) {
       overview.push({ ...contact, error: err.message });
     }

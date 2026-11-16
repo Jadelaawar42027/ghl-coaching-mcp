@@ -303,16 +303,19 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_conversation_timeline',
-    'Get the full message timeline for a conversation: SMS, email, and calls, in order, with timestamps and direction (inbound/outbound). Call messages will have no body text - use get_call_transcript separately for those.',
-    { conversationId: z.string().describe('The GHL conversation ID') },
-    async ({ conversationId }) => {
+    'Get the message timeline for a conversation, newest first: SMS, WhatsApp, email and calls, with timestamps and direction (inbound/outbound). Emails include their subject, from/to and full readable body (quoted earlier emails removed) - read them like any other message; they often carry buying signals, objections and next steps. An email marked emailBodyUnavailable could not be loaded, so say so rather than guessing its content. Call messages have no body text - use get_call_transcript for those. A contact can have several conversations (get_conversations): check each one.',
+    {
+      conversationId: z.string().describe('The GHL conversation ID'),
+      limit: z.number().int().min(1).max(500).optional().describe('How many of the newest messages to return (default 100)'),
+    },
+    async ({ conversationId, limit }) => {
       try {
         await assertConversationAccess(conversationId, identity, canViewAll);
       } catch (err) {
         if (err instanceof AccessDeniedError) return denied(err);
         throw err;
       }
-      const results = await getConversationMessages(conversationId);
+      const results = await getConversationMessages(conversationId, limit || 100);
       return { content: [{ type: 'text', text: JSON.stringify(results, null, 2) }] };
     }
   );
@@ -345,7 +348,7 @@ export function registerTools(server, identity) {
 
   server.tool(
     'get_broker_leads_overview',
-    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per lead), call count, lastOutboundMessageDate (the date of the broker\'s most recent outbound message in this contact\'s primary conversation thread - use this directly for cadence/overdue checks instead of calling get_last_broker_contact_date per lead; only fall back to that separate tool if you need to check EVERY conversation thread for a contact, not just the primary one), lastTouchDate (the date of the most recent message in EITHER direction, not just outbound - use this, not lastOutboundMessageDate, when checking whether a lead has had ANY recent activity at all, since a lead can show recent engagement via an inbound reply or an untracked-channel follow-up with no logged outbound message), "outcome" (the GHL "Broker Outcomes" custom field - one of "Call Performed", "Call No Show", "Scheduled Showing", "Performed Showing", "Sale Closed", "Ghosted / Abandoned", "Lost", or null if never set by the broker), Lead Priority status (Buy Now/Active/Nurture/Low Priority/On Hold/Closed - the primary prioritization signal), and Hot flag (a separate boolean marking especially urgent buying signals within any priority tier). A lead with outcome "Sale Closed" or "Lost" is done - the broker has explicitly marked it, and this is a stronger/more current signal than the priority tier field, which can be stale. Does NOT include message text or transcripts. Non-leadership brokers can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied. Setters can request any broker\'s overview (read-only).',
+    'Get a compact summary of every lead assigned to a broker: touch count (most recent 100 messages per conversation, across ALL of the lead\'s conversation threads), call count, email count, lastOutboundMessageDate (the date of the broker\'s most recent outbound message across all of the lead\'s threads, emails included - use this directly for cadence/overdue checks instead of calling get_last_broker_contact_date per lead), lastTouchDate (the date of the most recent message in EITHER direction, not just outbound - use this, not lastOutboundMessageDate, when checking whether a lead has had ANY recent activity at all, since a lead can show recent engagement via an inbound reply or an untracked-channel follow-up with no logged outbound message), "outcome" (the GHL "Broker Outcomes" custom field - one of "Call Performed", "Call No Show", "Scheduled Showing", "Performed Showing", "Sale Closed", "Ghosted / Abandoned", "Lost", or null if never set by the broker), Lead Priority status (Buy Now/Active/Nurture/Low Priority/On Hold/Closed - the primary prioritization signal), and Hot flag (a separate boolean marking especially urgent buying signals within any priority tier). A lead with outcome "Sale Closed" or "Lost" is done - the broker has explicitly marked it, and this is a stronger/more current signal than the priority tier field, which can be stale. Does NOT include message text, email content or transcripts - read get_conversation_timeline for those. Non-leadership brokers can only request their own overview (their own ghlUserId) - requesting another broker\'s overview is denied. Setters can request any broker\'s overview (read-only).',
     { brokerId: z.string().describe('The GHL user ID of the broker, from list_brokers') },
     async ({ brokerId }) => {
       if (!canViewAll(identity) && brokerId !== identity.ghlUserId) {
