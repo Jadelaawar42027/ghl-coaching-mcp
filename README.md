@@ -78,6 +78,31 @@ Deploy `server-http.js` the same way as the WhatsApp bot — Railway or Render b
 - `get_opportunities_by_stage` — leads sitting in a specific pipeline stage
 - `create_task` — create a follow-up task (only when explicitly asked)
 
+## Read-only connector for web Claude
+
+claude.ai custom connectors can't send the bot's signed token, so there's a second endpoint for
+them: `POST /connector/<READONLY_CONNECTOR_SECRET>`. It needs no sign-in, so the secret URL is
+the only protection. For that reason it only has the read tools:
+- `search_contacts`, `get_conversations`, `get_conversation_timeline`, `get_call_transcript`
+- `list_brokers`, `get_broker_leads_overview`
+- `list_pipelines`, `get_opportunities_by_stage`, `get_opportunities_for_contact`
+- `get_contact_notes`, `get_contact_tasks`
+- `get_last_broker_contact_date`, `has_outbound_call_record`
+
+It runs as leadership, so it can read every contact. Nothing on it can write to GHL or text a
+lead. The list is an allowlist in [readonly-connector.js](readonly-connector.js), so a new tool
+stays off the connector until it's deliberately added there. A test checks this.
+
+- **Turn it on:** set `READONLY_CONNECTOR_SECRET` on Railway (at least 32 characters). In claude.ai,
+  go to Settings → Connectors → Add custom connector and paste
+  `https://<this service's domain>/connector/<secret>`.
+- **Turn it off:** remove the variable. Every request to the connector then gets a 404.
+- **Rotate the secret:** change the variable and redeploy. The old URL stops working, so update the
+  connector in claude.ai.
+- **A wrong secret gets a plain 404,** never a 401, so claude.ai doesn't go looking for a sign-in
+  service.
+- **Every tool call is logged** as `[web connector] <tool>(<arguments>)`.
+
 ## Security note
 
 `server-http.js` sits on the public internet in front of real lead, broker, and pipeline

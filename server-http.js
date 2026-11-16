@@ -5,6 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { registerTools } from './tools.js';
 import { resolveGhlUserId, UserResolutionError } from './brokerResolver.js';
+import { readOnlyRegistrar, secretMatches, CONNECTOR_IDENTITY } from './readonly-connector.js';
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -60,11 +61,11 @@ async function requireAuth(req, res, next) {
   next();
 }
 
-// Stateless mode: a fresh McpServer + transport per request, scoped to the
-// caller's verified identity.
-app.post('/mcp', requireAuth, async (req, res) => {
-  const server = new McpServer({ name: 'ghl-coaching-mcp', version: '1.0.0' });
-  registerTools(server, req.identity);
+// Stateless mode: a fresh McpServer + transport per request, scoped to the caller's identity.
+// readOnly swaps in the allowlist stand-in for the web connector (see readonly-connector.js).
+async function handleMcpRequest(req, res, identity, { serverName = 'ghl-coaching-mcp', readOnly = false } = {}) {
+  const server = new McpServer({ name: serverName, version: '1.0.0' });
+  registerTools(readOnly ? readOnlyRegistrar(server) : server, identity);
 
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: undefined, // stateless - no session tracking needed
@@ -85,7 +86,7 @@ app.post('/mcp', requireAuth, async (req, res) => {
     const toolName = req.body?.params?.name;
     const toolArgs = req.body?.params?.arguments;
     console.error(
-      `MCP request error for ${req.identity?.name} (${req.identity?.role})` +
+      `MCP request error for ${identity?.name} (${identity?.role})` +
         (toolName ? ` calling ${toolName}(${JSON.stringify(toolArgs)})` : '') + ':',
       err
     );
@@ -93,6 +94,23 @@ app.post('/mcp', requireAuth, async (req, res) => {
       res.status(500).json({ error: 'Internal server error' });
     }
   }
+}
+
+app.post('/mcp', requireAuth, (req, res) => handleMcpRequest(req, res, req.identity));
+
+// Read-only connector for web Claude - see readonly-connector.js. A wrong or missing secret gets
+// a plain 404 (never 401, which would send claude.ai looking for a sign-in service).
+app.post('/connector/:secret', (req, res) => {
+  if (!secretMatches(req.params.secret)) return res.status(404).send('Not found');
+  if (req.body?.method === 'tools/call') {
+    console.log(`[web connector] ${req.body.params?.name}(${JSON.stringify(req.body.params?.arguments || {})})`);
+  }
+  return handleMcpRequest(req, res, { ...CONNECTOR_IDENTITY }, { serverName: 'ghl-coaching-readonly', readOnly: true });
+});
+
+app.get('/connector/:secret', (req, res) => {
+  if (!secretMatches(req.params.secret)) return res.status(404).send('Not found');
+  res.status(405).json({ error: 'Method not allowed - this server runs in stateless mode (POST only).' });
 });
 
 app.get('/mcp', requireAuth, (req, res) => {
